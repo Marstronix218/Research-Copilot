@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Research Copilot Panel</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="sidebar-body">
+    <div class="sidebar-shell">
+      <div class="topbar">
+        <div>
+          <h1>Research Copilot</h1>
+          <div id="updatedAt" class="muted small"></div>
+        </div>
+      </div>
+
+      <section class="section">
+        <h2>Goal</h2>
+        <div id="goalText" class="card muted">No active session.</div>
+      </section>
+
+      <section class="section">
+        <h2>Research Questions</h2>
+        <ul id="questionsList" class="list"></ul>
+      </section>
+
+      <section class="section">
+        <h2>Insights</h2>
+        <div id="insightsList"></div>
+      </section>
+
+      <section class="section">
+        <h2>Missing Topics</h2>
+        <ul id="missingTopicsList" class="list"></ul>
+      </section>
+
+      <section class="section">
+        <h2>Sources</h2>
+        <ul id="sourcesList" class="list"></ul>
+      </section>
+    </div>
+    <script src="sidebar.js"></script>
+  </body>
+</html>
