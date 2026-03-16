@@ -7,6 +7,19 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .goal_clarifier import (
+    ClarifyNextRequest,
+    ClarifyRefineRequest,
+    ClarifyStartRequest,
+    build_next_prompt,
+    build_refine_prompt,
+    build_start_prompt,
+    heuristic_next,
+    heuristic_start,
+    parse_clarification_response,
+    SYSTEM_PROMPT,
+)
+
 load_dotenv()
 
 app = FastAPI(title="Research Copilot Backend", version="0.1.0")
@@ -174,6 +187,58 @@ def heuristic_questions(goal: str) -> List[str]:
         f"What policies or solutions are relevant to {goal}?",
     ]
     return templates
+
+
+# ── Goal clarification endpoints ──────────────────────────────────────────────
+
+def _call_llm_for_clarification(system: str, user: str) -> dict:
+    """Call the LLM and parse a clarification response; raises on failure."""
+    completion = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=0.4,
+        response_format={"type": "json_object"},
+    )
+    raw = completion.choices[0].message.content or "{}"
+    return parse_clarification_response(raw)
+
+
+@app.post("/api/clarify-goal/start")
+def clarify_goal_start(req: ClarifyStartRequest):
+    if client:
+        try:
+            prompt = build_start_prompt(req.roughGoal)
+            return _call_llm_for_clarification(SYSTEM_PROMPT, prompt)
+        except Exception as exc:
+            print(f"clarify-goal/start LLM error: {exc}")
+    return heuristic_start(req.roughGoal)
+
+
+@app.post("/api/clarify-goal/next")
+def clarify_goal_next(req: ClarifyNextRequest):
+    if client:
+        try:
+            prompt = build_next_prompt(req.roughGoal, req.chatHistory, req.answers)
+            return _call_llm_for_clarification(SYSTEM_PROMPT, prompt)
+        except Exception as exc:
+            print(f"clarify-goal/next LLM error: {exc}")
+    return heuristic_next(req.roughGoal, req.chatHistory, req.answers)
+
+
+@app.post("/api/clarify-goal/refine")
+def clarify_goal_refine(req: ClarifyRefineRequest):
+    if client:
+        try:
+            prompt = build_refine_prompt(
+                req.roughGoal, req.chatHistory, req.answers, req.currentClarifiedGoal
+            )
+            return _call_llm_for_clarification(SYSTEM_PROMPT, prompt)
+        except Exception as exc:
+            print(f"clarify-goal/refine LLM error: {exc}")
+    return heuristic_next(req.roughGoal, req.chatHistory, req.answers)
 
 
 def heuristic_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
