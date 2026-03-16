@@ -29,6 +29,11 @@
       <div class="section">
         <label for="backendUrl">Backend URL</label>
         <input id="backendUrl" type="text" placeholder="http://localhost:8000" />
+        <label for="fontSize" class="section-label">Font size</label>
+        <div class="row gap-sm">
+          <input id="fontSize" type="range" min="12" max="20" step="1" />
+          <span id="fontSizeValue" class="small muted"></span>
+        </div>
         <label class="checkbox-row">
           <input id="autoAnalyze" type="checkbox" />
           Auto-analyze pages during research sessions

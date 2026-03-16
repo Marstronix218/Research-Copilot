@@ -31,11 +31,13 @@ async function sendPageContent() {
 }
 
 let analysisToast;
+let analysisToastTimeout;
 
 function showAnalysisToast(result) {
   if (!result?.page_summary) return;
 
   if (analysisToast) analysisToast.remove();
+  if (analysisToastTimeout) clearTimeout(analysisToastTimeout);
 
   analysisToast = document.createElement('div');
   analysisToast.style.position = 'fixed';
@@ -55,12 +57,32 @@ function showAnalysisToast(result) {
     <div style="font-size:12px;color:#cbd5e1;">Topic: ${escapeHtml(result.primary_topic || 'General')}</div>
   `;
 
+  analysisToast.addEventListener('mouseenter', () => {
+    if (analysisToastTimeout) {
+      clearTimeout(analysisToastTimeout);
+      analysisToastTimeout = null;
+    }
+  });
+
+  analysisToast.addEventListener('mouseleave', () => {
+    scheduleToastDismiss(5000);
+  });
+
   document.body.appendChild(analysisToast);
-  setTimeout(() => analysisToast?.remove(), 7000);
+  scheduleToastDismiss(15000);
+}
+
+function scheduleToastDismiss(delayMs) {
+  if (analysisToastTimeout) clearTimeout(analysisToastTimeout);
+  analysisToastTimeout = setTimeout(() => {
+    analysisToast?.remove();
+    analysisToast = null;
+    analysisToastTimeout = null;
+  }, delayMs);
 }
 
 function escapeHtml(str) {
-  return str
+  return (str || '')
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')

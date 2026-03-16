@@ -1,8 +1,23 @@
 const DEFAULT_SETTINGS = {
   backendUrl: 'http://localhost:8000',
   autoAnalyze: true,
-  maxContentLength: 12000
+  maxContentLength: 12000,
+  uiFontSize: 14
 };
+
+function createEmptySession() {
+  return {
+    goal: '',
+    questions: [],
+    insights: [],
+    sources: [],
+    missingTopics: [],
+    paused: false,
+    pausedAt: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+}
 
 chrome.runtime.onInstalled.addListener(async () => {
   const existing = await chrome.storage.local.get(['settings', 'session']);
@@ -10,17 +25,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     await chrome.storage.local.set({ settings: DEFAULT_SETTINGS });
   }
   if (!existing.session) {
-    await chrome.storage.local.set({
-      session: {
-        goal: '',
-        questions: [],
-        insights: [],
-        sources: [],
-        missingTopics: [],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      }
-    });
+    await chrome.storage.local.set({ session: createEmptySession() });
   }
 });
 
@@ -44,17 +49,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'CLEAR_SESSION': {
-        const emptySession = {
-          goal: '',
-          questions: [],
-          insights: [],
-          sources: [],
-          missingTopics: [],
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        };
+        const emptySession = createEmptySession();
         await chrome.storage.local.set({ session: emptySession });
         sendResponse({ ok: true, data: emptySession });
+        break;
+      }
+      case 'TOGGLE_SESSION_PAUSE': {
+        const updated = await toggleSessionPause(message.payload?.paused);
+        sendResponse({ ok: true, data: updated });
         break;
       }
       case 'PAGE_CONTENT': {
@@ -66,6 +68,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const current = await chrome.storage.local.get(['settings']);
         const settings = { ...(current.settings || DEFAULT_SETTINGS), ...message.payload };
         await chrome.storage.local.set({ settings });
+        await broadcastSettingsUpdate(settings);
         sendResponse({ ok: true, data: settings });
         break;
       }
@@ -121,6 +124,8 @@ async function startSession(payload) {
     insights: [],
     sources: [],
     missingTopics: data.questions || [],
+    paused: false,
+    pausedAt: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -139,6 +144,10 @@ async function handlePageContent(payload, sender) {
 
   if (!session?.goal) {
     return { skipped: true, reason: 'No active research session' };
+  }
+
+  if (session.paused) {
+    return { skipped: true, reason: 'Research session is paused' };
   }
 
   if (!payload?.content || payload.content.trim().length < 200) {
@@ -170,9 +179,10 @@ async function handlePageContent(payload, sender) {
     analyzedAt: new Date().toISOString()
   };
 
+  const updatedInsights = mergeInsights(session.insights, analysis.insights || [], source);
   const updated = {
     ...session,
-    insights: mergeInsights(session.insights, analysis.insights || []),
+    insights: updatedInsights,
     sources: mergeSources(session.sources, source),
     missingTopics: analysis.missing_topics || session.missingTopics
   };
@@ -194,15 +204,47 @@ async function handlePageContent(payload, sender) {
   return analysis;
 }
 
-function mergeInsights(existing, incoming) {
+async function toggleSessionPause(paused) {
+  const session = await getSession();
+  if (!session?.goal) {
+    return session;
+  }
+
+  const shouldPause = typeof paused === 'boolean' ? paused : !Boolean(session.paused);
+  const updated = {
+    ...session,
+    paused: shouldPause,
+    pausedAt: shouldPause ? new Date().toISOString() : null
+  };
+
+  await setSession(updated);
+  return updated;
+}
+
+function insightKey(item) {
+  return `${item.topic || ''}::${item.summary || ''}`;
+}
+
+function mergeInsights(existing, incoming, source) {
   const normalized = [...existing];
   for (const item of incoming) {
-    const exists = normalized.some((x) => x.summary === item.summary && x.topic === item.topic);
-    if (!exists) {
+    const key = insightKey(item);
+    const index = normalized.findIndex((x) => insightKey(x) === key);
+    if (index === -1) {
       normalized.push({
         ...item,
-        addedAt: new Date().toISOString()
+        addedAt: new Date().toISOString(),
+        sources: [source]
       });
+    } else {
+      const existingSources = Array.isArray(normalized[index].sources) ? normalized[index].sources : [];
+      const alreadyLinked = existingSources.some((x) => x.url === source.url);
+      if (!alreadyLinked) {
+        normalized[index] = {
+          ...normalized[index],
+          sources: [...existingSources, source]
+        };
+      }
     }
   }
   return normalized;
@@ -229,6 +271,17 @@ async function broadcastSessionUpdate(session) {
   for (const view of views) {
     try {
       chrome.runtime.sendMessage({ type: 'SESSION_UPDATED', payload: session, targetContextId: view.contextId });
+    } catch {
+      // no-op
+    }
+  }
+}
+
+async function broadcastSettingsUpdate(settings) {
+  const views = await chrome.runtime.getContexts({ contextTypes: ['SIDE_PANEL', 'POPUP'] });
+  for (const view of views) {
+    try {
+      chrome.runtime.sendMessage({ type: 'SETTINGS_UPDATED', payload: settings, targetContextId: view.contextId });
     } catch {
       // no-op
     }
