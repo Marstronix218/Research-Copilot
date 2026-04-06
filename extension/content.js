@@ -166,9 +166,7 @@ function showInsightNotification(result) {
   const toastEl = analysisToast;
 
   const insightCount = insights.length;
-  const insightCountText = insightCount
-    ? `${insightCount} insight${insightCount === 1 ? '' : 's'} ready to save`
-    : 'Insight ready to save';
+  const insightCountText = `${insightCount} insight${insightCount === 1 ? '' : 's'} ready to save`;
 
   toastEl.innerHTML = `
     <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:8px;">
@@ -182,15 +180,15 @@ function showInsightNotification(result) {
     </div>
     <div style="font-size:13px;line-height:1.4;margin-bottom:6px;">${escapeHtml(summaryText)}</div>
     <div style="font-size:12px;color:#cbd5e1;margin-bottom:6px;">Topic: ${escapeHtml(result?.primary_topic || insights[0]?.topic || 'General')}</div>
+    ${insightCount ? `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
       <div style="font-size:12px;color:#93c5fd;">${escapeHtml(insightCountText)}</div>
       <button
         type="button"
         id="rc-analysis-save-btn"
         style="background:#2563eb;color:#fff;border:none;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:11px;font-weight:600;min-width:0;min-height:0;"
-        ${insightCount ? '' : 'disabled'}
       >Add to sidebar</button>
-    </div>
+    </div>` : ''}
     <div
       id="rc-analysis-status"
       style="display:none;font-size:12px;margin-top:8px;"
