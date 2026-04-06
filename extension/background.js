@@ -121,7 +121,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case 'SAVE_ANALYSIS_INSIGHTS': {
         const result = await saveAnalysisInsights(message.payload, sender);
-        sendResponse({ ok: true, data: result });
+        if (result && result.saved === false) {
+          sendResponse({
+            ok: false,
+            error: result.reason || 'Failed to save analysis insights',
+            data: result,
+          });
+        } else {
+          sendResponse({ ok: true, data: result });
+        }
         break;
       }
       case 'SAVE_SETTINGS': {
