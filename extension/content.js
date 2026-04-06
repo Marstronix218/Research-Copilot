@@ -135,7 +135,15 @@ async function persistAnalysisInsights(result, controls) {
     saveButton.textContent = 'Add to sidebar';
     statusEl.style.display = 'block';
     statusEl.style.color = '#fca5a5';
-    statusEl.textContent = 'Could not save insight';
+    const reason =
+      typeof error?.reason === 'string' && error.reason.trim()
+        ? error.reason.trim()
+        : typeof error?.message === 'string' && error.message.trim()
+          ? error.message.trim()
+          : '';
+    statusEl.textContent = reason
+      ? `Could not save insights: ${reason}`
+      : 'Could not save insights';
     updateToastPositions();
     console.debug('Could not save analysis insights', error);
   }
