@@ -4,6 +4,20 @@ const SIDEBAR_UI_STATE_KEY = 'sidebarUiState';
 const DEFAULT_TAB = 'overview';
 const DEFAULT_INSIGHTS_VIEW = 'grouped';
 const VALID_TABS = new Set(['overview', 'insights', 'questions', 'sources']);
+const STATE_STORAGE_KEYS = [
+  'settings',
+  'currentSessionId',
+  'sessionOrder',
+  'sessionsById',
+  'session',
+];
+const RELEVANT_STORAGE_KEYS = new Set([
+  'settings',
+  'currentSessionId',
+  'sessionOrder',
+  'sessionsById',
+  'session',
+]);
 
 let previousInsightKeys = new Set();
 let currentSession = null;
@@ -12,10 +26,12 @@ let selectedTab = DEFAULT_TAB;
 let insightsViewMode = DEFAULT_INSIGHTS_VIEW;
 let groupedViewAvailable = Boolean(insightGroupingApi?.prepareInsightViewModel);
 let openClusterIds = new Set();
+let highlightedInsightKeys = new Set();
 let forcedTimelineFallback = false;
 let sidebarUiState = { sessions: {} };
 let persistUiStatePromise = Promise.resolve();
 let sessionMenuOpen = false;
+let scheduledRefreshHandle = null;
 
 const updatedAtEl = document.getElementById('updatedAt');
 const sessionSwitcherSectionEl = document.querySelector('.session-switcher-section');
@@ -56,6 +72,91 @@ async function getState() {
   return sendMessage('GET_SESSION');
 }
 
+function sortSessionIdsByUpdatedAt(ids, sessionsById) {
+  return [...ids].sort((leftId, rightId) => {
+    const leftValue = sessionsById[leftId]?.updatedAt || '';
+    const rightValue = sessionsById[rightId]?.updatedAt || '';
+    return rightValue.localeCompare(leftValue);
+  });
+}
+
+function buildStorageBackedState(snapshot = {}) {
+  const settings = snapshot?.settings || {};
+  const sessionsById = snapshot?.sessionsById && typeof snapshot.sessionsById === 'object'
+    ? snapshot.sessionsById
+    : {};
+  const knownIds = new Set(Object.keys(sessionsById));
+  const orderedIds = Array.isArray(snapshot?.sessionOrder)
+    ? snapshot.sessionOrder.filter((sessionId) => knownIds.has(sessionId))
+    : [];
+  const missingIds = sortSessionIdsByUpdatedAt(
+    [...knownIds].filter((sessionId) => !orderedIds.includes(sessionId)),
+    sessionsById,
+  );
+  const allSessionIds = [...orderedIds, ...missingIds];
+
+  let currentSessionIdFromStore = typeof snapshot?.currentSessionId === 'string'
+    && sessionsById[snapshot.currentSessionId]
+    ? snapshot.currentSessionId
+    : allSessionIds[0] || null;
+  let session = currentSessionIdFromStore ? sessionsById[currentSessionIdFromStore] || null : null;
+
+  if (!session && snapshot?.session && typeof snapshot.session === 'object') {
+    session = snapshot.session;
+    currentSessionIdFromStore = snapshot.session.id || currentSessionIdFromStore;
+  }
+
+  return {
+    settings,
+    session,
+    currentSessionId: currentSessionIdFromStore,
+    allSessions: allSessionIds.map((sessionId) => sessionsById[sessionId]).filter(Boolean),
+  };
+}
+
+function hasLoadedSessionData(state) {
+  return Boolean(state?.session?.id || state?.currentSessionId || state?.allSessions?.length);
+}
+
+function pickBestAvailableState(runtimeState, storageState) {
+  if (!hasLoadedSessionData(runtimeState)) {
+    return storageState;
+  }
+
+  if (hasLoadedSessionData(storageState)) {
+    const runtimeCount = Array.isArray(runtimeState?.allSessions) ? runtimeState.allSessions.length : 0;
+    const storageCount = Array.isArray(storageState?.allSessions) ? storageState.allSessions.length : 0;
+
+    if (storageCount > runtimeCount) {
+      return storageState;
+    }
+
+    if (!runtimeState?.session?.id && storageState?.session?.id) {
+      return storageState;
+    }
+  }
+
+  return runtimeState;
+}
+
+async function getStateFromStorage() {
+  const snapshot = await chrome.storage.local.get(STATE_STORAGE_KEYS);
+  return buildStorageBackedState(snapshot);
+}
+
+async function getBestAvailableState() {
+  const storageStatePromise = getStateFromStorage();
+
+  try {
+    const runtimeState = await getState();
+    const storageState = await storageStatePromise;
+    return pickBestAvailableState(runtimeState, storageState);
+  } catch (error) {
+    console.warn('Falling back to chrome.storage.local for sidebar state', error);
+    return storageStatePromise;
+  }
+}
+
 function normalizeFontSize(value) {
   const num = Number.parseInt(value, 10);
   if (Number.isNaN(num)) return 14;
@@ -64,6 +165,11 @@ function normalizeFontSize(value) {
 
 function applyFontSize(sizePx) {
   document.documentElement.style.setProperty('--ui-font-size', `${sizePx}px`);
+}
+
+function setTextContent(element, value) {
+  if (!element) return;
+  element.textContent = value;
 }
 
 function createDefaultSessionUiState() {
@@ -449,12 +555,12 @@ function setSessionMenuOpen(isOpen) {
 }
 
 function clearNewSessionError() {
-  newSessionErrorEl.textContent = '';
+  setTextContent(newSessionErrorEl, '');
   newSessionErrorEl.classList.add('hidden');
 }
 
 function setNewSessionError(message) {
-  newSessionErrorEl.textContent = message;
+  setTextContent(newSessionErrorEl, message);
   newSessionErrorEl.classList.toggle('hidden', !message);
 }
 
@@ -477,7 +583,7 @@ function setNewSessionSubmitting(isSubmitting) {
   startNewSessionBtn.disabled = isSubmitting;
   cancelNewSessionBtn.disabled = isSubmitting;
   newSessionGoalInputEl.disabled = isSubmitting;
-  startNewSessionBtn.textContent = isSubmitting ? 'Starting…' : 'Start session';
+  setTextContent(startNewSessionBtn, isSubmitting ? 'Starting…' : 'Start session');
 }
 
 async function handleCurrentSessionAction(session) {
@@ -613,9 +719,12 @@ function renderSessionSwitcher(allSessions, activeId) {
   const activeSession = sessions.find((session) => session?.id === activeId) || null;
   const metaParts = [];
 
-  sessionSwitcherLabelEl.textContent = activeSession?.id
+  setTextContent(
+    sessionSwitcherLabelEl,
+    activeSession?.id
     ? getSessionDisplayTitle(activeSession)
-    : 'No session selected';
+    : 'No session selected',
+  );
 
   if (activeSession?.id) {
     const updatedLabel = formatSessionTimestamp(activeSession.updatedAt)
@@ -624,9 +733,12 @@ function renderSessionSwitcher(allSessions, activeId) {
     metaParts.push(buildSessionCountSummary(activeSession));
   }
 
-  sessionSwitcherMetaEl.textContent = metaParts.length
-    ? metaParts.join(' • ')
-    : 'Start a new session or reopen a past workspace.';
+  setTextContent(
+    sessionSwitcherMetaEl,
+    metaParts.length
+      ? metaParts.join(' • ')
+      : 'Start a new session or reopen a past workspace.',
+  );
 
   sessionDropdownMenuEl.innerHTML = '';
 
@@ -671,6 +783,24 @@ function renderTabBar() {
   }
 }
 
+function renderActiveTabContent(session, highlightNew = false) {
+  switch (selectedTab) {
+    case 'insights':
+      renderInsightsTab(session, highlightNew);
+      break;
+    case 'questions':
+      renderQuestionsTab(session);
+      break;
+    case 'sources':
+      renderSourcesTab(session);
+      break;
+    case 'overview':
+    default:
+      renderOverviewTab(session);
+      break;
+  }
+}
+
 function setActiveTab(tabId, { persist = true } = {}) {
   if (!VALID_TABS.has(tabId)) {
     selectedTab = DEFAULT_TAB;
@@ -679,6 +809,7 @@ function setActiveTab(tabId, { persist = true } = {}) {
   }
 
   renderTabBar();
+  renderActiveTabContent(currentSession, false);
 
   if (persist && currentSession?.id) {
     syncCurrentSessionUiState({ selectedTab });
@@ -800,7 +931,8 @@ function insightKey(insight) {
 }
 
 function buildFallbackTimeline(insights) {
-  return [...(Array.isArray(insights) ? insights : [])]
+  return orderTimelineNewestFirst(
+    [...(Array.isArray(insights) ? insights : [])]
     .map((insight, index) => {
       const addedAt = insight?.addedAt || insight?.sources?.[0]?.analyzedAt || '';
       const addedAtMs = Date.parse(addedAt);
@@ -812,15 +944,19 @@ function buildFallbackTimeline(insights) {
         addedAtMs: Number.isFinite(addedAtMs) ? addedAtMs : null,
         tags: insight?.topic ? [insight.topic] : [],
       };
-    })
-    .sort((left, right) => {
-      if (left.addedAtMs != null && right.addedAtMs != null) {
-        return left.addedAtMs - right.addedAtMs || left.index - right.index;
-      }
-      if (left.addedAtMs != null) return -1;
-      if (right.addedAtMs != null) return 1;
-      return left.index - right.index;
-    });
+    }),
+  );
+}
+
+function orderTimelineNewestFirst(items) {
+  return [...(Array.isArray(items) ? items : [])].sort((left, right) => {
+    if (left?.addedAtMs != null && right?.addedAtMs != null) {
+      return right.addedAtMs - left.addedAtMs || (right.index || 0) - (left.index || 0);
+    }
+    if (left?.addedAtMs != null) return -1;
+    if (right?.addedAtMs != null) return 1;
+    return (right?.index || 0) - (left?.index || 0);
+  });
 }
 
 function createTag(text, className = '') {
@@ -861,10 +997,11 @@ function renderInsightSourceLine(card, insight) {
 
 function createInsightCard(item, highlightNew) {
   const insight = item.original || item;
+  const key = item.key || insightKey(insight);
   const card = document.createElement('div');
   card.className = 'card insight-card';
 
-  if (highlightNew && !previousInsightKeys.has(item.key || insightKey(insight))) {
+  if (highlightedInsightKeys.has(key) || (highlightNew && !previousInsightKeys.has(key))) {
     card.classList.add('insight-new');
   }
 
@@ -1081,6 +1218,7 @@ function renderInsights(insights, highlightNew) {
   if (hasInsights && insightGroupingApi?.prepareInsightViewModel) {
     try {
       presentation = insightGroupingApi.prepareInsightViewModel(insights);
+      presentation.timeline = orderTimelineNewestFirst(presentation.timeline);
       groupedViewAvailable = presentation.clusters.length > 0;
       if (!groupedViewAvailable) {
         notice = 'Showing timeline because topic grouping did not produce any usable clusters for these insights.';
@@ -1122,11 +1260,12 @@ function renderInsights(insights, highlightNew) {
     insightsMetaEl.textContent = `${presentation.clusters.length} topic cluster${presentation.clusters.length === 1 ? '' : 's'}`;
     renderGroupedInsights(presentation.clusters, highlightNew);
   } else {
-    insightsMetaEl.textContent = `${presentation.timeline.length} insight${presentation.timeline.length === 1 ? '' : 's'} in collection order`;
+    insightsMetaEl.textContent = `${presentation.timeline.length} insight${presentation.timeline.length === 1 ? '' : 's'}, newest first`;
     renderTimeline(presentation.timeline, highlightNew);
   }
 
   previousInsightKeys = new Set(insights.map(insightKey));
+
 }
 
 function renderInsightsTab(session, highlightNew) {
@@ -1232,9 +1371,12 @@ function renderSourcesTab(session) {
 
 function renderSession(session, highlightNew = true) {
   currentSession = session || null;
-  updatedAtEl.textContent = session?.updatedAt
-    ? formatSessionTimestamp(session.updatedAt, 'Last updated')
-    : '';
+  setTextContent(
+    updatedAtEl,
+    session?.updatedAt
+      ? formatSessionTimestamp(session.updatedAt, 'Last updated')
+      : '',
+  );
 
   renderTabBar();
   renderOverviewTab(session);
@@ -1254,7 +1396,14 @@ function applySessionState(state, highlightNew = true) {
     selectedTab = nextCurrentSessionId ? nextUiState.selectedTab : DEFAULT_TAB;
     insightsViewMode = nextCurrentSessionId ? nextUiState.insightsViewMode : DEFAULT_INSIGHTS_VIEW;
     openClusterIds = new Set(nextCurrentSessionId ? nextUiState.openClusterIds : []);
+    highlightedInsightKeys = new Set();
     forcedTimelineFallback = false;
+  } else {
+    const nextInsightKeys = new Set((nextSession?.insights || []).map(insightKey));
+    const addedKeys = [...nextInsightKeys].filter((key) => !previousInsightKeys.has(key));
+    if (addedKeys.length) {
+      highlightedInsightKeys = new Set(addedKeys);
+    }
   }
 
   currentSessionId = nextCurrentSessionId;
@@ -1263,8 +1412,23 @@ function applySessionState(state, highlightNew = true) {
 }
 
 async function refreshState(highlightNew = true) {
-  const state = await getState();
+  const state = await getBestAvailableState();
   applySessionState(state, highlightNew);
+}
+
+function scheduleRefreshState(highlightNew = false) {
+  if (scheduledRefreshHandle != null) {
+    return;
+  }
+
+  scheduledRefreshHandle = setTimeout(async () => {
+    scheduledRefreshHandle = null;
+    try {
+      await refreshState(highlightNew);
+    } catch (error) {
+      console.error('Failed to refresh sidebar state', error);
+    }
+  }, 0);
 }
 
 for (const button of tabButtons) {
@@ -1331,13 +1495,38 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local') return;
+
+  const shouldRefresh = Object.keys(changes).some((key) => RELEVANT_STORAGE_KEYS.has(key));
+  if (!shouldRefresh) return;
+
+  scheduleRefreshState(false);
+});
+
+window.addEventListener('focus', () => {
+  scheduleRefreshState(false);
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    scheduleRefreshState(false);
+  }
+});
+
 async function initializeSidebar() {
   await loadSidebarUiState();
-  const state = await getState();
+  const state = await getBestAvailableState();
   const { session, settings } = state;
   applyFontSize(normalizeFontSize(settings?.uiFontSize));
   previousInsightKeys = new Set((session?.insights || []).map(insightKey));
   applySessionState(state, false);
+
+  if (session?.insights?.length) {
+    requestAnimationFrame(() => {
+      renderInsightsTab(currentSession, false);
+    });
+  }
 }
 
 initializeSidebar().catch((error) => {

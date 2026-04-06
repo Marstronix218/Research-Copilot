@@ -410,8 +410,8 @@ async function handlePageContent(payload, sender) {
 
 async function saveAnalysisInsights(payload, sender) {
   const session = await getCurrentSession();
-  if (!session?.goal || !isSessionActive(session)) {
-    throw new Error('No active research session');
+  if (!session?.goal) {
+    throw new Error('No current research session');
   }
 
   const insights = Array.isArray(payload?.insights) ? payload.insights : [];
@@ -785,24 +785,18 @@ function safeDomain(url) {
 
 async function broadcastSessionUpdate() {
   const payload = await buildSessionStatePayload();
-  const views = await chrome.runtime.getContexts({ contextTypes: ['SIDE_PANEL', 'POPUP'] });
-  for (const view of views) {
-    try {
-      chrome.runtime.sendMessage({ type: 'SESSION_UPDATED', payload, targetContextId: view.contextId });
-    } catch {
-      // no-op
-    }
+  try {
+    await chrome.runtime.sendMessage({ type: 'SESSION_UPDATED', payload });
+  } catch {
+    // Ignore when no extension page is listening.
   }
 }
 
 async function broadcastSettingsUpdate(settings) {
-  const views = await chrome.runtime.getContexts({ contextTypes: ['SIDE_PANEL', 'POPUP'] });
-  for (const view of views) {
-    try {
-      chrome.runtime.sendMessage({ type: 'SETTINGS_UPDATED', payload: settings, targetContextId: view.contextId });
-    } catch {
-      // no-op
-    }
+  try {
+    await chrome.runtime.sendMessage({ type: 'SETTINGS_UPDATED', payload: settings });
+  } catch {
+    // Ignore when no extension page is listening.
   }
 }
 
