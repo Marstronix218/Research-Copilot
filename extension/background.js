@@ -6,11 +6,20 @@ import {
   createActiveSession,
   createDefaultBrowsingState,
   createDefaultDriftState,
+  createSession,
   DEFAULT_DRIFT_SETTINGS,
   ensureDriftStateInitialized,
+  ensureSessionStoreInitialized,
+  getAllSessions,
   getDriftBundle,
+  getCurrentSession,
+  getCurrentSessionId,
+  getSession,
   hasManualOverride,
+  saveSession,
   resetDriftForSessionEnd,
+  deleteSession as deleteStoredSession,
+  setCurrentSession,
   setActiveSession,
   setBrowsingState,
   setDriftState,
@@ -26,33 +35,18 @@ const DEFAULT_SETTINGS = {
 const DRIFT_ALARM_NAME = 'drift-tick';
 let currentIdleState = 'active';
 
-function createEmptySession() {
-  return {
-    goal: '',
-    questions: [],
-    insights: [],
-    sources: [],
-    missingTopics: [],
-    paused: false,
-    pausedAt: null,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-}
-
 chrome.runtime.onInstalled.addListener(async () => {
-  const existing = await chrome.storage.local.get(['settings', 'session']);
+  const existing = await chrome.storage.local.get(['settings']);
   if (!existing.settings) {
     await chrome.storage.local.set({ settings: DEFAULT_SETTINGS });
   }
-  if (!existing.session) {
-    await chrome.storage.local.set({ session: createEmptySession() });
-  }
+  await ensureSessionStoreInitialized();
   await ensureDriftStateInitialized();
   await ensureDriftAlarm();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
+  await ensureSessionStoreInitialized();
   await ensureDriftStateInitialized();
   await ensureDriftAlarm();
 });
@@ -98,15 +92,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'GET_SESSION': {
-        const data = await chrome.storage.local.get(['session', 'settings']);
+        const data = await buildSessionStatePayload();
         sendResponse({ ok: true, data });
         break;
       }
       case 'CLEAR_SESSION': {
-        const emptySession = createEmptySession();
-        await chrome.storage.local.set({ session: emptySession });
-        await resetDriftForSessionEnd();
-        sendResponse({ ok: true, data: emptySession });
+        const sessionId = message.payload?.sessionId || await getCurrentSessionId();
+        const deleted = await deleteSessionAndSync(sessionId);
+        sendResponse({ ok: true, data: deleted });
+        break;
+      }
+      case 'OPEN_SESSION': {
+        const opened = await openSession(message.payload?.sessionId);
+        sendResponse({ ok: true, data: opened });
+        break;
+      }
+      case 'DELETE_SESSION': {
+        const deleted = await deleteSessionAndSync(message.payload?.sessionId);
+        sendResponse({ ok: true, data: deleted });
         break;
       }
       case 'TOGGLE_SESSION_PAUSE': {
@@ -178,20 +181,122 @@ async function getSettings() {
   return { ...DEFAULT_SETTINGS, ...(stored.settings || {}) };
 }
 
-async function getSession() {
-  const stored = await chrome.storage.local.get(['session']);
-  return stored.session;
+async function buildSessionStatePayload() {
+  const [settings, session, currentSessionId, allSessions] = await Promise.all([
+    getSettings(),
+    getCurrentSession(),
+    getCurrentSessionId(),
+    getAllSessions(),
+  ]);
+
+  return {
+    settings,
+    session,
+    currentSessionId,
+    allSessions,
+  };
 }
 
-async function setSession(session) {
-  session.updatedAt = new Date().toISOString();
-  await chrome.storage.local.set({ session });
-  await broadcastSessionUpdate(session);
+async function commitSessionUpdate(session) {
+  const saved = await saveSession(session);
+  await broadcastSessionUpdate();
+  return saved;
+}
+
+async function archiveCurrentSession({ excludeSessionId = null } = {}) {
+  const currentSession = await getCurrentSession();
+  if (!currentSession?.id || currentSession.id === excludeSessionId) {
+    return currentSession;
+  }
+
+  if (currentSession.status === 'paused') {
+    return currentSession;
+  }
+
+  return commitSessionUpdate({
+    ...currentSession,
+    status: 'saved',
+    paused: false,
+    pausedAt: null,
+  });
+}
+
+async function syncDriftToCurrentSession(reason, { resetTracking = false } = {}) {
+  const session = await getCurrentSession();
+  if (!isSessionActive(session)) {
+    await resetDriftForSessionEnd();
+    return session;
+  }
+
+  await setActiveSession(createActiveSession({
+    id: session.id,
+    goal: session.goal,
+    researchQuestions: session.researchQuestions,
+    createdAt: session.createdAt,
+  }));
+
+  if (resetTracking) {
+    await setBrowsingState(createDefaultBrowsingState(Date.now()));
+    await setDriftState(createDefaultDriftState(Date.now()));
+  }
+
+  await syncActiveTabState(reason);
   return session;
 }
 
+async function openSession(sessionId) {
+  if (!sessionId) {
+    return null;
+  }
+
+  const targetSession = await getSession(sessionId);
+  if (!targetSession) {
+    return null;
+  }
+
+  const currentSessionId = await getCurrentSessionId();
+  if (currentSessionId !== sessionId) {
+    await archiveCurrentSession({ excludeSessionId: sessionId });
+    await setCurrentSession(sessionId);
+  }
+
+  let updatedSession = targetSession;
+  if (targetSession.status !== 'active' || targetSession.paused) {
+    updatedSession = await commitSessionUpdate({
+      ...targetSession,
+      status: 'active',
+      paused: false,
+      pausedAt: null,
+    });
+    await setCurrentSession(updatedSession.id);
+  } else {
+    await broadcastSessionUpdate();
+  }
+
+  await syncDriftToCurrentSession('open-session', { resetTracking: currentSessionId !== sessionId });
+  return updatedSession;
+}
+
+async function deleteSessionAndSync(sessionId) {
+  if (!sessionId) {
+    return null;
+  }
+
+  const previousCurrentSessionId = await getCurrentSessionId();
+  const deletedSession = await deleteStoredSession(sessionId);
+  if (!deletedSession) {
+    return null;
+  }
+
+  if (previousCurrentSessionId === sessionId) {
+    await syncDriftToCurrentSession('delete-session', { resetTracking: true });
+  }
+  await broadcastSessionUpdate();
+  return deletedSession;
+}
+
 function isSessionActive(session) {
-  return Boolean(session?.goal) && !Boolean(session?.paused);
+  return Boolean(session?.goal) && session?.status === 'active' && !Boolean(session?.paused);
 }
 
 function logDrift(enabled, ...args) {
@@ -212,36 +317,27 @@ async function startSession(payload) {
   }
 
   const data = await response.json();
-  const session = {
+  await archiveCurrentSession();
+
+  const session = await createSession({
+    title: data.goal,
     goal: data.goal,
-    questions: data.questions || [],
+    researchQuestions: data.questions || [],
     insights: [],
     sources: [],
     missingTopics: data.questions || [],
-    paused: false,
-    pausedAt: null,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-
-  await setSession(session);
-
-  const activeSession = createActiveSession({
-    goal: session.goal,
-    questions: session.questions,
-    createdAt: session.createdAt,
+    status: 'active',
   });
-  await setActiveSession(activeSession);
-  await setBrowsingState(createDefaultBrowsingState(Date.now()));
-  await setDriftState(createDefaultDriftState(Date.now()));
-  await syncActiveTabState('start-session');
+
+  await broadcastSessionUpdate();
+  await syncDriftToCurrentSession('start-session', { resetTracking: true });
 
   return session;
 }
 
 async function handlePageContent(payload, sender) {
   const settings = await getSettings();
-  const session = await getSession();
+  const session = await getCurrentSession();
 
   if (!settings.autoAnalyze) {
     return { skipped: true, reason: 'Auto analysis disabled' };
@@ -251,8 +347,13 @@ async function handlePageContent(payload, sender) {
     return { skipped: true, reason: 'No active research session' };
   }
 
-  if (session.paused) {
-    return { skipped: true, reason: 'Research session is paused' };
+  if (!isSessionActive(session)) {
+    return {
+      skipped: true,
+      reason: session.status === 'paused'
+        ? 'Research session is paused'
+        : 'Research session is not active',
+    };
   }
 
   if (!payload?.content || payload.content.trim().length < 200) {
@@ -264,7 +365,7 @@ async function handlePageContent(payload, sender) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       goal: session.goal,
-      questions: session.questions,
+      questions: session.researchQuestions,
       page: {
         ...payload,
         content: payload.content.slice(0, settings.maxContentLength),
@@ -290,7 +391,7 @@ async function handlePageContent(payload, sender) {
     missingTopics: analysis.missing_topics || session.missingTopics,
   };
 
-  await setSession(updated);
+  await commitSessionUpdate(updated);
 
   const activeTabId = sender?.tab?.id;
   if (activeTabId && analysis.page_summary) {
@@ -308,8 +409,8 @@ async function handlePageContent(payload, sender) {
 }
 
 async function saveAnalysisInsights(payload, sender) {
-  const session = await getSession();
-  if (!session?.goal) {
+  const session = await getCurrentSession();
+  if (!session?.goal || !isSessionActive(session)) {
     throw new Error('No active research session');
   }
 
@@ -339,45 +440,36 @@ async function saveAnalysisInsights(payload, sender) {
   const updated = {
     ...session,
     insights: updatedInsights,
+    topics: collectTopicsFromInsights(updatedInsights),
     sources: mergeSources(existingSources, source),
   };
 
-  await setSession(updated);
+  const savedSession = await commitSessionUpdate(updated);
   return {
     saved: true,
     addedCount: Math.max(0, updatedInsights.length - existingInsights.length),
-    session: updated,
+    session: savedSession,
   };
 }
 
 async function toggleSessionPause(paused) {
-  const session = await getSession();
+  const session = await getCurrentSession();
   if (!session?.goal) {
     return session;
   }
 
   const shouldPause = typeof paused === 'boolean' ? paused : !Boolean(session.paused);
-  const updated = {
+  const updated = await commitSessionUpdate({
     ...session,
+    status: shouldPause ? 'paused' : 'active',
     paused: shouldPause,
     pausedAt: shouldPause ? new Date().toISOString() : null,
-  };
-
-  await setSession(updated);
+  });
 
   if (shouldPause) {
-    const { activeSession } = await getDriftBundle();
-    if (activeSession) {
-      await setActiveSession({ ...activeSession, isActive: false });
-    }
+    await resetDriftForSessionEnd();
   } else {
-    const newActive = createActiveSession({
-      goal: updated.goal,
-      questions: updated.questions,
-      createdAt: updated.createdAt,
-    });
-    await setActiveSession(newActive);
-    await syncActiveTabState('resume-session');
+    await syncDriftToCurrentSession('resume-session', { resetTracking: true });
   }
 
   return updated;
@@ -428,7 +520,7 @@ async function handleMarkPageRelevant(payload, sender) {
 }
 
 async function syncActiveTabState(reason) {
-  const session = await getSession();
+  const session = await getCurrentSession();
   if (!isSessionActive(session)) return;
 
   const { browsingState, driftSettings, activeSession } = await getDriftBundle();
@@ -505,7 +597,7 @@ function finalizeCurrentHistoryItem(history, now) {
 
 async function runDriftTick(trigger) {
   // TODO: Add lightweight session analytics counters for drift events over time.
-  const session = await getSession();
+  const session = await getCurrentSession();
   if (!isSessionActive(session)) return;
 
   const bundle = await getDriftBundle();
@@ -515,8 +607,9 @@ async function runDriftTick(trigger) {
   let activeSession = bundle.activeSession;
   if (!activeSession?.isActive) {
     activeSession = createActiveSession({
+      id: session.id,
       goal: session.goal,
-      questions: session.questions,
+      researchQuestions: session.researchQuestions,
       createdAt: session.createdAt,
     });
     await setActiveSession(activeSession);
@@ -635,6 +728,20 @@ function insightKey(item) {
   return `${item.topic || ''}::${item.summary || ''}`;
 }
 
+function collectTopicsFromInsights(insights) {
+  const seen = new Set();
+  const topics = [];
+  for (const insight of Array.isArray(insights) ? insights : []) {
+    const topic = String(insight?.topic || '').trim();
+    if (!topic) continue;
+    const key = topic.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    topics.push(topic);
+  }
+  return topics;
+}
+
 function mergeInsights(existing, incoming, source) {
   const normalized = [...existing];
   for (const item of incoming) {
@@ -676,11 +783,12 @@ function safeDomain(url) {
   }
 }
 
-async function broadcastSessionUpdate(session) {
+async function broadcastSessionUpdate() {
+  const payload = await buildSessionStatePayload();
   const views = await chrome.runtime.getContexts({ contextTypes: ['SIDE_PANEL', 'POPUP'] });
   for (const view of views) {
     try {
-      chrome.runtime.sendMessage({ type: 'SESSION_UPDATED', payload: session, targetContextId: view.contextId });
+      chrome.runtime.sendMessage({ type: 'SESSION_UPDATED', payload, targetContextId: view.contextId });
     } catch {
       // no-op
     }

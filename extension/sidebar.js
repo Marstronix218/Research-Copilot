@@ -2,19 +2,30 @@ const insightGroupingApi = globalThis.ResearchCopilotInsightGrouping;
 
 let previousInsightKeys = new Set();
 let currentSession = null;
+let currentSessionId = null;
 let insightsViewMode = 'grouped';
 let groupedViewAvailable = Boolean(insightGroupingApi?.prepareInsightViewModel);
 let openClusterIds = new Set();
 let forcedTimelineFallback = false;
 
+const currentSessionSummaryEl = document.getElementById('currentSessionSummary');
+const pastSessionsListEl = document.getElementById('pastSessionsList');
+const pastSessionsMetaEl = document.getElementById('pastSessionsMeta');
 const groupedInsightsBtn = document.getElementById('groupedInsightsBtn');
 const timelineInsightsBtn = document.getElementById('timelineInsightsBtn');
 const insightsMetaEl = document.getElementById('insightsMeta');
 const insightsNoticeEl = document.getElementById('insightsNotice');
 
-async function getState() {
-  const response = await chrome.runtime.sendMessage({ type: 'GET_SESSION' });
+async function sendMessage(type, payload = {}) {
+  const response = await chrome.runtime.sendMessage({ type, payload });
+  if (!response?.ok) {
+    throw new Error(response?.error || 'Unexpected extension error');
+  }
   return response.data;
+}
+
+async function getState() {
+  return sendMessage('GET_SESSION');
 }
 
 function renderList(id, items, emptyText) {
@@ -45,6 +56,50 @@ function normalizeFontSize(value) {
 
 function applyFontSize(sizePx) {
   document.documentElement.style.setProperty('--ui-font-size', `${sizePx}px`);
+}
+
+function getResearchQuestions(session) {
+  if (Array.isArray(session?.researchQuestions)) return session.researchQuestions;
+  if (Array.isArray(session?.questions)) return session.questions;
+  return [];
+}
+
+function formatSessionTimestamp(value, prefix = 'Updated') {
+  if (!value) return '';
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return '';
+  }
+
+  return `${prefix} ${parsed.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })}`;
+}
+
+function getSessionStatusLabel(session) {
+  switch (session?.status) {
+    case 'paused':
+      return 'Paused';
+    case 'saved':
+      return 'Saved';
+    default:
+      return 'Active';
+  }
+}
+
+function getSessionStatusClass(session) {
+  switch (session?.status) {
+    case 'paused':
+      return 'warning';
+    case 'saved':
+      return 'muted';
+    default:
+      return 'success';
+  }
 }
 
 function formatCapturedAt(value) {
@@ -396,6 +451,212 @@ function renderInsights(insights, highlightNew) {
   previousInsightKeys = new Set(insights.map(insightKey));
 }
 
+function renderSessionStats(container, session) {
+  const stats = document.createElement('div');
+  stats.className = 'session-stats';
+
+  const items = [
+    `${getResearchQuestions(session).length} question${getResearchQuestions(session).length === 1 ? '' : 's'}`,
+    `${(session?.insights || []).length} insight${(session?.insights || []).length === 1 ? '' : 's'}`,
+    `${(session?.sources || []).length} source${(session?.sources || []).length === 1 ? '' : 's'}`,
+  ];
+
+  for (const label of items) {
+    const stat = document.createElement('span');
+    stat.className = 'session-stat';
+    stat.textContent = label;
+    stats.appendChild(stat);
+  }
+
+  container.appendChild(stats);
+}
+
+async function handleCurrentSessionAction(session) {
+  if (!session?.id) return;
+
+  if (session.status === 'saved') {
+    await sendMessage('OPEN_SESSION', { sessionId: session.id });
+    return;
+  }
+
+  await sendMessage('TOGGLE_SESSION_PAUSE', {
+    paused: session.status === 'active',
+  });
+}
+
+async function handleDeleteSession(sessionId) {
+  if (!sessionId) return;
+  if (!window.confirm('Delete this research session from local storage?')) return;
+  await sendMessage('DELETE_SESSION', { sessionId });
+}
+
+function renderCurrentSessionSummary(session) {
+  currentSessionSummaryEl.innerHTML = '';
+
+  if (!session?.id) {
+    currentSessionSummaryEl.innerHTML = `
+      <div class="card muted">
+        No current session selected. Start a new session from the popup or reopen one from Past Sessions.
+      </div>
+    `;
+    return;
+  }
+
+  const card = document.createElement('article');
+  card.className = 'card session-card current-session-card';
+
+  const header = document.createElement('div');
+  header.className = 'session-card-header';
+
+  const titleBlock = document.createElement('div');
+
+  const title = document.createElement('strong');
+  title.textContent = session.title || session.goal || 'Untitled research session';
+  titleBlock.appendChild(title);
+
+  const meta = document.createElement('div');
+  meta.className = 'muted small';
+  meta.textContent = formatSessionTimestamp(session.updatedAt) || formatSessionTimestamp(session.createdAt, 'Created');
+  titleBlock.appendChild(meta);
+
+  header.appendChild(titleBlock);
+
+  const status = document.createElement('span');
+  status.className = `status-pill ${getSessionStatusClass(session)}`;
+  status.textContent = getSessionStatusLabel(session);
+  header.appendChild(status);
+
+  card.appendChild(header);
+
+  const goal = document.createElement('p');
+  goal.className = 'session-goal muted';
+  goal.textContent = session.goal || 'No goal saved yet.';
+  card.appendChild(goal);
+
+  renderSessionStats(card, session);
+
+  const actions = document.createElement('div');
+  actions.className = 'session-actions';
+
+  const primaryBtn = document.createElement('button');
+  primaryBtn.type = 'button';
+  primaryBtn.className = 'secondary session-action-btn';
+  primaryBtn.textContent = session.status === 'active' ? 'Pause' : 'Resume';
+  primaryBtn.addEventListener('click', async () => {
+    try {
+      await handleCurrentSessionAction(session);
+      await refreshState(false);
+    } catch (error) {
+      window.alert(error.message || 'Failed to update session');
+    }
+  });
+  actions.appendChild(primaryBtn);
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.type = 'button';
+  deleteBtn.className = 'danger session-action-btn';
+  deleteBtn.textContent = 'Delete';
+  deleteBtn.addEventListener('click', async () => {
+    try {
+      await handleDeleteSession(session.id);
+      await refreshState(false);
+    } catch (error) {
+      window.alert(error.message || 'Failed to delete session');
+    }
+  });
+  actions.appendChild(deleteBtn);
+
+  card.appendChild(actions);
+  currentSessionSummaryEl.appendChild(card);
+}
+
+function renderPastSessions(allSessions, activeId) {
+  const sessions = (Array.isArray(allSessions) ? allSessions : []).filter((session) => session?.id !== activeId);
+  pastSessionsMetaEl.textContent = sessions.length
+    ? `${sessions.length} session${sessions.length === 1 ? '' : 's'}`
+    : '';
+
+  pastSessionsListEl.innerHTML = '';
+
+  if (!sessions.length) {
+    pastSessionsListEl.innerHTML = `
+      <div class="card muted">
+        Past sessions will appear here after you start a new research session.
+      </div>
+    `;
+    return;
+  }
+
+  for (const session of sessions) {
+    const item = document.createElement('article');
+    item.className = 'card session-card past-session-card';
+
+    const header = document.createElement('div');
+    header.className = 'session-card-header';
+
+    const titleBlock = document.createElement('div');
+
+    const title = document.createElement('strong');
+    title.textContent = session.title || session.goal || 'Untitled research session';
+    titleBlock.appendChild(title);
+
+    const meta = document.createElement('div');
+    meta.className = 'muted small';
+    meta.textContent = formatSessionTimestamp(session.updatedAt) || formatSessionTimestamp(session.createdAt, 'Created');
+    titleBlock.appendChild(meta);
+
+    header.appendChild(titleBlock);
+
+    const status = document.createElement('span');
+    status.className = `status-pill ${getSessionStatusClass(session)}`;
+    status.textContent = getSessionStatusLabel(session);
+    header.appendChild(status);
+
+    item.appendChild(header);
+
+    const goal = document.createElement('p');
+    goal.className = 'session-goal muted';
+    goal.textContent = session.goal || 'No goal saved yet.';
+    item.appendChild(goal);
+
+    renderSessionStats(item, session);
+
+    const actions = document.createElement('div');
+    actions.className = 'session-actions';
+
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.className = 'secondary session-action-btn';
+    openBtn.textContent = session.status === 'paused' ? 'Resume' : 'Open';
+    openBtn.addEventListener('click', async () => {
+      try {
+        await sendMessage('OPEN_SESSION', { sessionId: session.id });
+        await refreshState(false);
+      } catch (error) {
+        window.alert(error.message || 'Failed to open session');
+      }
+    });
+    actions.appendChild(openBtn);
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'danger session-action-btn';
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.addEventListener('click', async () => {
+      try {
+        await handleDeleteSession(session.id);
+        await refreshState(false);
+      } catch (error) {
+        window.alert(error.message || 'Failed to delete session');
+      }
+    });
+    actions.appendChild(deleteBtn);
+
+    item.appendChild(actions);
+    pastSessionsListEl.appendChild(item);
+  }
+}
+
 function renderSession(session, highlightNew = true) {
   currentSession = session || null;
   document.getElementById('goalText').textContent = session?.goal || 'No active session.';
@@ -403,7 +664,7 @@ function renderSession(session, highlightNew = true) {
     ? `Updated ${new Date(session.updatedAt).toLocaleString()}`
     : '';
 
-  renderList('questionsList', session?.questions, 'No research questions yet.');
+  renderList('questionsList', getResearchQuestions(session), 'No research questions yet.');
   renderInsights(session?.insights, highlightNew);
   renderList('missingTopicsList', session?.missingTopics, 'No missing topics flagged.');
   renderSources(session?.sources);
@@ -449,11 +710,30 @@ timelineInsightsBtn.addEventListener('click', () => {
   renderInsights(currentSession?.insights, false);
 });
 
+function applySessionState(state, highlightNew = true) {
+  const nextSession = state?.session || null;
+  const nextCurrentSessionId = state?.currentSessionId || nextSession?.id || null;
+  const isSameSession = Boolean(currentSession?.id && nextSession?.id && currentSession.id === nextSession.id);
+
+  if (!isSameSession) {
+    previousInsightKeys = new Set((nextSession?.insights || []).map(insightKey));
+    openClusterIds = new Set();
+  }
+
+  currentSessionId = nextCurrentSessionId;
+  renderCurrentSessionSummary(nextSession);
+  renderPastSessions(state?.allSessions, nextCurrentSessionId);
+  renderSession(nextSession, highlightNew && isSameSession);
+}
+
+async function refreshState(highlightNew = true) {
+  const state = await getState();
+  applySessionState(state, highlightNew);
+}
+
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'SESSION_UPDATED') {
-    if (message.payload?.updatedAt) {
-      renderSession(message.payload);
-    }
+    applySessionState(message.payload, true);
     return;
   }
 
@@ -462,8 +742,9 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
-getState().then(({ session, settings }) => {
+getState().then((state) => {
+  const { session, settings } = state;
   applyFontSize(normalizeFontSize(settings?.uiFontSize));
   previousInsightKeys = new Set((session?.insights || []).map(insightKey));
-  renderSession(session, false);
+  applySessionState(state, false);
 });

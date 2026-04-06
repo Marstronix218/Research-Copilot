@@ -48,6 +48,14 @@ h2 {
   margin-top: 16px;
 }
 
+.section-header-inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
 textarea,
 input[type="text"],
 input[type="range"] {
@@ -128,6 +136,83 @@ button.danger {
   border-radius: 12px;
   padding: 12px;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.session-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.current-session-card {
+  border-color: #bfdbfe;
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.08);
+}
+
+.session-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.session-goal {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.session-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.session-action-btn {
+  padding: 8px 10px;
+  min-width: 72px;
+}
+
+.session-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.session-stat,
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.session-stat {
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.status-pill.success {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.status-pill.warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.status-pill.muted {
+  background: #e2e8f0;
+  color: #475569;
 }
 
 .list {

@@ -1,3 +1,7 @@
+// Store sessions as an indexed map plus an explicit order list so export and sync can build on it later.
+const SESSION_STORAGE_KEYS = ['currentSessionId', 'sessionOrder', 'sessionsById', 'session'];
+const VALID_SESSION_STATUSES = new Set(['active', 'paused', 'saved']);
+
 export const DEFAULT_DRIFT_SETTINGS = {
   enabled: true,
   inactivityThresholdMs: 10 * 60 * 1000,
@@ -11,6 +15,358 @@ export const DEFAULT_DRIFT_SETTINGS = {
 
 // TODO: Add user-configurable drift sensitivity controls in popup settings.
 // TODO: Persist per-user domain allowlist/denylist overrides.
+
+function normalizeTimestamp(value, fallback) {
+  const parsed = Date.parse(value);
+  if (Number.isFinite(parsed)) {
+    return new Date(parsed).toISOString();
+  }
+  return fallback;
+}
+
+function generateSessionId(now = Date.now()) {
+  return `session-${now}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function buildSessionTitle(title, goal) {
+  const base = String(title || goal || '').trim();
+  if (!base) return 'Untitled research session';
+  return base.length > 80 ? `${base.slice(0, 77)}...` : base;
+}
+
+function normalizeStringList(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+}
+
+function collectSessionTopics(insights, fallbackTopics) {
+  const normalizedFallback = normalizeStringList(fallbackTopics);
+  if (normalizedFallback.length) {
+    return normalizedFallback;
+  }
+
+  const seen = new Set();
+  const topics = [];
+  for (const insight of Array.isArray(insights) ? insights : []) {
+    const topic = String(insight?.topic || '').trim();
+    if (!topic) continue;
+    const key = topic.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    topics.push(topic);
+  }
+  return topics;
+}
+
+function normalizeSessionStatus(status, paused) {
+  if (VALID_SESSION_STATUSES.has(status)) {
+    return status;
+  }
+  if (paused) {
+    return 'paused';
+  }
+  return 'active';
+}
+
+function normalizeSession(input = {}, nowIso = new Date().toISOString()) {
+  const goal = String(input.goal || '').trim();
+  const researchQuestions = normalizeStringList(
+    Array.isArray(input.researchQuestions) ? input.researchQuestions : input.questions,
+  );
+  const insights = Array.isArray(input.insights) ? input.insights : [];
+  const sources = Array.isArray(input.sources) ? input.sources : [];
+  const missingTopics = normalizeStringList(input.missingTopics);
+  const groups = Array.isArray(input.groups) ? input.groups : [];
+  const chatHistory = Array.isArray(input.chatHistory)
+    ? input.chatHistory
+    : Array.isArray(input.clarificationChat)
+      ? input.clarificationChat
+      : [];
+  const paused = Boolean(input.paused);
+  const status = normalizeSessionStatus(input.status, paused);
+  const createdAt = normalizeTimestamp(input.createdAt, nowIso);
+  const updatedAt = normalizeTimestamp(input.updatedAt, nowIso);
+
+  return {
+    id: String(input.id || generateSessionId()).trim(),
+    title: buildSessionTitle(input.title, goal),
+    goal,
+    createdAt,
+    updatedAt,
+    status,
+    researchQuestions,
+    insights,
+    topics: collectSessionTopics(insights, input.topics),
+    groups,
+    sources,
+    missingTopics,
+    chatHistory,
+    paused: status === 'paused',
+    pausedAt: status === 'paused'
+      ? normalizeTimestamp(input.pausedAt, updatedAt)
+      : null,
+  };
+}
+
+function hasMeaningfulSession(session) {
+  if (!session || typeof session !== 'object') return false;
+  return Boolean(
+    String(session.goal || '').trim()
+      || session.questions?.length
+      || session.researchQuestions?.length
+      || session.insights?.length
+      || session.sources?.length,
+  );
+}
+
+function moveSessionIdToFront(sessionOrder, sessionId) {
+  const next = (Array.isArray(sessionOrder) ? sessionOrder : []).filter((id) => id !== sessionId);
+  next.unshift(sessionId);
+  return next;
+}
+
+function normalizeSessionStoreSnapshot(snapshot = {}) {
+  let changed = false;
+  const rawSessions = snapshot.sessionsById && typeof snapshot.sessionsById === 'object'
+    ? snapshot.sessionsById
+    : {};
+
+  const sessionsById = {};
+  for (const [sessionId, sessionValue] of Object.entries(rawSessions)) {
+    const normalized = normalizeSession({ ...sessionValue, id: sessionId });
+    sessionsById[normalized.id] = normalized;
+    if (sessionId !== normalized.id || JSON.stringify(sessionValue) !== JSON.stringify(normalized)) {
+      changed = true;
+    }
+  }
+
+  const rawOrder = Array.isArray(snapshot.sessionOrder) ? snapshot.sessionOrder : [];
+  const seen = new Set();
+  const sessionOrder = [];
+  for (const sessionId of rawOrder) {
+    if (seen.has(sessionId) || !sessionsById[sessionId]) continue;
+    seen.add(sessionId);
+    sessionOrder.push(sessionId);
+  }
+
+  const missingIds = Object.keys(sessionsById)
+    .filter((sessionId) => !seen.has(sessionId))
+    .sort((leftId, rightId) => {
+      return sessionsById[rightId].updatedAt.localeCompare(sessionsById[leftId].updatedAt);
+    });
+
+  if (missingIds.length > 0 || rawOrder.length !== sessionOrder.length) {
+    changed = true;
+  }
+
+  sessionOrder.push(...missingIds);
+
+  const currentSessionId = typeof snapshot.currentSessionId === 'string' && sessionsById[snapshot.currentSessionId]
+    ? snapshot.currentSessionId
+    : sessionOrder[0] || null;
+
+  if (currentSessionId !== (snapshot.currentSessionId ?? null)) {
+    changed = true;
+  }
+
+  return {
+    changed,
+    store: {
+      currentSessionId,
+      sessionOrder,
+      sessionsById,
+    },
+  };
+}
+
+function migrateLegacySessionSnapshot(snapshot) {
+  const normalized = normalizeSessionStoreSnapshot(snapshot);
+  let { store } = normalized;
+  let changed = normalized.changed;
+  const shouldRemoveLegacy = Object.prototype.hasOwnProperty.call(snapshot, 'session');
+
+  if (!store.sessionOrder.length && hasMeaningfulSession(snapshot.session)) {
+    const legacySession = normalizeSession(snapshot.session);
+    store = {
+      currentSessionId: legacySession.id,
+      sessionOrder: [legacySession.id],
+      sessionsById: {
+        [legacySession.id]: legacySession,
+      },
+    };
+    changed = true;
+  }
+
+  return {
+    changed,
+    shouldRemoveLegacy,
+    store,
+  };
+}
+
+async function persistSessionStore(store, { removeLegacy = false } = {}) {
+  await chrome.storage.local.set({
+    currentSessionId: store.currentSessionId,
+    sessionOrder: store.sessionOrder,
+    sessionsById: store.sessionsById,
+  });
+
+  if (removeLegacy) {
+    await chrome.storage.local.remove(['session']);
+  }
+}
+
+async function getSessionStore() {
+  const snapshot = await chrome.storage.local.get(SESSION_STORAGE_KEYS);
+  const { store, changed, shouldRemoveLegacy } = migrateLegacySessionSnapshot(snapshot);
+
+  if (changed || shouldRemoveLegacy) {
+    await persistSessionStore(store, { removeLegacy: shouldRemoveLegacy });
+  }
+
+  return store;
+}
+
+function cloneSession(session) {
+  return session ? structuredClone(session) : null;
+}
+
+function cloneSessions(sessions) {
+  return structuredClone(sessions);
+}
+
+export async function ensureSessionStoreInitialized() {
+  await getSessionStore();
+}
+
+export async function getAllSessions() {
+  const store = await getSessionStore();
+  return cloneSessions(
+    store.sessionOrder
+      .map((sessionId) => store.sessionsById[sessionId])
+      .filter(Boolean),
+  );
+}
+
+export async function getSession(sessionId) {
+  if (!sessionId) return null;
+  const store = await getSessionStore();
+  return cloneSession(store.sessionsById[sessionId] || null);
+}
+
+export async function getCurrentSession() {
+  const store = await getSessionStore();
+  if (!store.currentSessionId) return null;
+  return cloneSession(store.sessionsById[store.currentSessionId] || null);
+}
+
+export async function getCurrentSessionId() {
+  const store = await getSessionStore();
+  return store.currentSessionId || null;
+}
+
+export async function saveSession(session) {
+  const store = await getSessionStore();
+  const existing = session?.id ? store.sessionsById[session.id] : null;
+  const nowIso = new Date().toISOString();
+  const normalized = normalizeSession(
+    {
+      ...existing,
+      ...session,
+      id: session?.id || existing?.id || generateSessionId(),
+      createdAt: existing?.createdAt || session?.createdAt || nowIso,
+      updatedAt: nowIso,
+    },
+    nowIso,
+  );
+
+  const nextStore = {
+    ...store,
+    sessionsById: {
+      ...store.sessionsById,
+      [normalized.id]: normalized,
+    },
+    sessionOrder: moveSessionIdToFront(store.sessionOrder, normalized.id),
+    currentSessionId: store.currentSessionId === normalized.id || !store.currentSessionId
+      ? normalized.id
+      : store.currentSessionId,
+  };
+
+  await persistSessionStore(nextStore);
+  return cloneSession(normalized);
+}
+
+export async function createSession(sessionData = {}) {
+  const nowIso = new Date().toISOString();
+  const session = normalizeSession(
+    {
+      ...sessionData,
+      id: generateSessionId(),
+      createdAt: sessionData.createdAt || nowIso,
+      updatedAt: nowIso,
+    },
+    nowIso,
+  );
+
+  const store = await getSessionStore();
+  const nextStore = {
+    currentSessionId: session.id,
+    sessionOrder: moveSessionIdToFront(store.sessionOrder, session.id),
+    sessionsById: {
+      ...store.sessionsById,
+      [session.id]: session,
+    },
+  };
+
+  await persistSessionStore(nextStore);
+  return cloneSession(session);
+}
+
+export async function deleteSession(sessionId) {
+  if (!sessionId) return null;
+
+  const store = await getSessionStore();
+  if (!store.sessionsById[sessionId]) {
+    return null;
+  }
+
+  const deletedSession = store.sessionsById[sessionId];
+  const sessionsById = { ...store.sessionsById };
+  delete sessionsById[sessionId];
+
+  const sessionOrder = store.sessionOrder.filter((id) => id !== sessionId);
+  const currentSessionId = store.currentSessionId === sessionId
+    ? sessionOrder[0] || null
+    : store.currentSessionId;
+
+  await persistSessionStore({
+    currentSessionId,
+    sessionOrder,
+    sessionsById,
+  });
+
+  return cloneSession(deletedSession);
+}
+
+export async function setCurrentSession(sessionId) {
+  if (!sessionId) return null;
+
+  const store = await getSessionStore();
+  if (!store.sessionsById[sessionId]) {
+    return null;
+  }
+
+  const nextStore = {
+    ...store,
+    currentSessionId: sessionId,
+    sessionOrder: moveSessionIdToFront(store.sessionOrder, sessionId),
+  };
+
+  await persistSessionStore(nextStore);
+  return cloneSession(nextStore.sessionsById[sessionId]);
+}
 
 export function createDefaultBrowsingState(now = Date.now()) {
   return {
@@ -36,13 +392,14 @@ export function createDefaultDriftState(now = Date.now()) {
   };
 }
 
-export function createActiveSession({ goal, questions = [], createdAt }) {
+export function createActiveSession({ id, goal, questions = [], researchQuestions, createdAt }) {
   const startedAt = createdAt ? new Date(createdAt).getTime() : Date.now();
+  const normalizedQuestions = Array.isArray(researchQuestions) ? researchQuestions : questions;
   return {
-    id: `${startedAt}-${Math.random().toString(36).slice(2, 8)}`,
+    id: id || generateSessionId(startedAt),
     goal,
-    keywords: extractKeywords(goal, questions),
-    researchQuestions: questions,
+    keywords: extractKeywords(goal, normalizedQuestions),
+    researchQuestions: normalizedQuestions,
     startedAt,
     isActive: true,
   };
