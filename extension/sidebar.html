@@ -26,6 +26,32 @@
 
       <section class="section">
         <h2>Insights</h2>
+        <div class="insights-toolbar">
+          <div class="segmented-control" role="tablist" aria-label="Insights view">
+            <button
+              type="button"
+              id="groupedInsightsBtn"
+              class="segmented-control-btn"
+              data-view="grouped"
+              role="tab"
+              aria-selected="true"
+            >
+              Group by Topic
+            </button>
+            <button
+              type="button"
+              id="timelineInsightsBtn"
+              class="segmented-control-btn"
+              data-view="timeline"
+              role="tab"
+              aria-selected="false"
+            >
+              Timeline
+            </button>
+          </div>
+          <div id="insightsMeta" class="muted small"></div>
+        </div>
+        <div id="insightsNotice" class="insights-notice hidden" aria-live="polite"></div>
         <div id="insightsList"></div>
       </section>
 
@@ -39,6 +65,7 @@
         <ul id="sourcesList" class="list"></ul>
       </section>
     </div>
+    <script src="insightGrouping.js"></script>
     <script src="sidebar.js"></script>
   </body>
 </html>
