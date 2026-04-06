@@ -23,6 +23,12 @@ function applyFontSize(sizePx) {
   document.documentElement.style.setProperty('--ui-font-size', `${sizePx}px`);
 }
 
+function getResearchQuestions(session) {
+  if (Array.isArray(session?.researchQuestions)) return session.researchQuestions;
+  if (Array.isArray(session?.questions)) return session.questions;
+  return [];
+}
+
 function getBackendUrl() {
   return document.getElementById('backendUrl').value.trim() || 'http://localhost:8000';
 }
@@ -380,16 +386,24 @@ function renderSession(session) {
     return;
   }
 
+  const questions = getResearchQuestions(session);
+  const statusLabel = session.status === 'paused'
+    ? 'Paused'
+    : session.status === 'saved'
+      ? 'Saved'
+      : 'Active';
+  const sessionActionLabel = session.status === 'active' ? 'Pause session' : 'Resume session';
+
   el.innerHTML = `
-    <div class="label-row"><strong>Active session</strong><button id="clearBtn" class="danger">Clear</button></div>
+    <div class="label-row"><strong>Current session</strong><button id="clearBtn" class="danger">Delete</button></div>
     <div class="card">
       <div><strong>Goal:</strong> ${escapeHtml(session.goal)}</div>
-      <div><strong>Status:</strong> ${session.paused ? 'Paused' : 'Active'}</div>
-      <div><strong>Questions:</strong> ${session.questions.length}</div>
+      <div><strong>Status:</strong> ${statusLabel}</div>
+      <div><strong>Questions:</strong> ${questions.length}</div>
       <div><strong>Insights:</strong> ${session.insights.length}</div>
       <div><strong>Sources:</strong> ${session.sources.length}</div>
       <div class="row gap-sm section-actions">
-        <button id="pauseBtn" class="secondary">${session.paused ? 'Resume session' : 'Pause session'}</button>
+        <button id="pauseBtn" class="secondary">${sessionActionLabel}</button>
       </div>
     </div>
   `;
@@ -400,7 +414,11 @@ function renderSession(session) {
   });
 
   document.getElementById('pauseBtn')?.addEventListener('click', async () => {
-    await sendMessage('TOGGLE_SESSION_PAUSE', { paused: !session.paused });
+    if (session.status === 'saved') {
+      await sendMessage('OPEN_SESSION', { sessionId: session.id });
+    } else {
+      await sendMessage('TOGGLE_SESSION_PAUSE', { paused: !session.paused });
+    }
     await loadState();
   });
 }
@@ -504,7 +522,7 @@ document.getElementById('resetGoalBtn').addEventListener('click', () => {
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'SESSION_UPDATED') {
-    renderSession(message.payload);
+    renderSession(message.payload?.session);
   }
 });
 

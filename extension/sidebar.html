@@ -7,63 +7,168 @@
   </head>
   <body class="sidebar-body">
     <div class="sidebar-shell">
-      <div class="topbar">
-        <div>
+      <header class="topbar workspace-header">
+        <div class="workspace-title-block">
           <h1>Research Copilot</h1>
           <div id="updatedAt" class="muted small"></div>
         </div>
+      </header>
+
+      <div class="workspace-controls">
+        <section class="session-switcher-section" aria-label="Session switcher">
+          <div class="section-header-inline">
+            <h2>Session</h2>
+          </div>
+          <div class="session-switcher-shell">
+            <button
+              type="button"
+              id="sessionSwitcherBtn"
+              class="session-switcher-btn"
+              aria-haspopup="menu"
+              aria-expanded="false"
+            >
+              <span class="session-switcher-copy">
+                <span id="sessionSwitcherLabel" class="session-switcher-title">No session selected</span>
+                <span id="sessionSwitcherMeta" class="session-switcher-meta muted small">
+                  Start a new session or reopen a past workspace.
+                </span>
+              </span>
+              <span class="session-switcher-chevron" aria-hidden="true">▾</span>
+            </button>
+            <div
+              id="sessionDropdownMenu"
+              class="session-dropdown-menu hidden"
+              role="menu"
+              aria-label="Research sessions"
+            ></div>
+          </div>
+
+          <div id="newSessionComposer" class="card new-session-composer hidden">
+            <div class="label-row">
+              <strong>New session</strong>
+              <button type="button" id="cancelNewSessionBtn" class="text-btn">Cancel</button>
+            </div>
+            <textarea
+              id="newSessionGoalInput"
+              rows="3"
+              placeholder="Example: Understand poverty in Japan"
+            ></textarea>
+            <div id="newSessionError" class="inline-error hidden"></div>
+            <div class="session-actions">
+              <button type="button" id="startNewSessionBtn">Start session</button>
+            </div>
+          </div>
+        </section>
+
+        <nav id="tabBar" class="tab-bar" role="tablist" aria-label="Session content">
+          <button
+            type="button"
+            id="tab-overview"
+            class="tab-btn active"
+            data-tab="overview"
+            role="tab"
+            aria-controls="overviewTabPanel"
+            aria-selected="true"
+          >
+            Overview
+          </button>
+          <button
+            type="button"
+            id="tab-insights"
+            class="tab-btn"
+            data-tab="insights"
+            role="tab"
+            aria-controls="insightsTabPanel"
+            aria-selected="false"
+          >
+            Insights
+          </button>
+          <button
+            type="button"
+            id="tab-questions"
+            class="tab-btn"
+            data-tab="questions"
+            role="tab"
+            aria-controls="questionsTabPanel"
+            aria-selected="false"
+          >
+            Questions
+          </button>
+          <button
+            type="button"
+            id="tab-sources"
+            class="tab-btn"
+            data-tab="sources"
+            role="tab"
+            aria-controls="sourcesTabPanel"
+            aria-selected="false"
+          >
+            Sources
+          </button>
+        </nav>
       </div>
 
-      <section class="section">
-        <h2>Goal</h2>
-        <div id="goalText" class="card muted">No active session.</div>
-      </section>
+      <main class="workspace-content">
+        <section id="overviewTabPanel" class="tab-panel" role="tabpanel" aria-labelledby="tab-overview">
+          <div id="overviewTabContent"></div>
+        </section>
 
-      <section class="section">
-        <h2>Research Questions</h2>
-        <ul id="questionsList" class="list"></ul>
-      </section>
-
-      <section class="section">
-        <h2>Insights</h2>
-        <div class="insights-toolbar">
-          <div class="segmented-control" role="tablist" aria-label="Insights view">
-            <button
-              type="button"
-              id="groupedInsightsBtn"
-              class="segmented-control-btn"
-              data-view="grouped"
-              role="tab"
-              aria-selected="true"
-            >
-              Group by Topic
-            </button>
-            <button
-              type="button"
-              id="timelineInsightsBtn"
-              class="segmented-control-btn"
-              data-view="timeline"
-              role="tab"
-              aria-selected="false"
-            >
-              Timeline
-            </button>
+        <section
+          id="insightsTabPanel"
+          class="tab-panel hidden"
+          role="tabpanel"
+          aria-labelledby="tab-insights"
+          hidden
+        >
+          <div class="insights-toolbar">
+            <div class="segmented-control" role="tablist" aria-label="Insights view">
+              <button
+                type="button"
+                id="groupedInsightsBtn"
+                class="segmented-control-btn"
+                data-view="grouped"
+                role="tab"
+                aria-selected="true"
+              >
+                Group by Topic
+              </button>
+              <button
+                type="button"
+                id="timelineInsightsBtn"
+                class="segmented-control-btn"
+                data-view="timeline"
+                role="tab"
+                aria-selected="false"
+              >
+                Timeline
+              </button>
+            </div>
+            <div id="insightsMeta" class="muted small"></div>
           </div>
-          <div id="insightsMeta" class="muted small"></div>
-        </div>
-        <div id="insightsNotice" class="insights-notice hidden" aria-live="polite"></div>
-        <div id="insightsList"></div>
-      </section>
+          <div id="insightsNotice" class="insights-notice hidden" aria-live="polite"></div>
+          <div id="insightsList"></div>
+        </section>
 
-      <section class="section">
-        <h2>Missing Topics</h2>
-        <ul id="missingTopicsList" class="list"></ul>
-      </section>
+        <section
+          id="questionsTabPanel"
+          class="tab-panel hidden"
+          role="tabpanel"
+          aria-labelledby="tab-questions"
+          hidden
+        >
+          <div id="questionsTabContent"></div>
+        </section>
 
-      <section class="section">
-        <h2>Sources</h2>
-        <ul id="sourcesList" class="list"></ul>
-      </section>
+        <section
+          id="sourcesTabPanel"
+          class="tab-panel hidden"
+          role="tabpanel"
+          aria-labelledby="tab-sources"
+          hidden
+        >
+          <div id="sourcesTabContent"></div>
+        </section>
+      </main>
     </div>
     <script src="insightGrouping.js"></script>
     <script src="sidebar.js"></script>
