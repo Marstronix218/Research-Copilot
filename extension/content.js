@@ -170,19 +170,14 @@ function showInsightNotification(result) {
     </div>
     <div style="font-size:13px;line-height:1.4;margin-bottom:6px;">${escapeHtml(summaryText)}</div>
     <div style="font-size:12px;color:#cbd5e1;margin-bottom:6px;">Topic: ${escapeHtml(result?.primary_topic || insights[0]?.topic || 'General')}</div>
-    <div style="font-size:12px;color:#93c5fd;margin-bottom:10px;">${escapeHtml(insightCountText)}</div>
-    <div style="display:flex;gap:8px;align-items:center;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+      <div style="font-size:12px;color:#93c5fd;">${escapeHtml(insightCountText)}</div>
       <button
         type="button"
         id="rc-analysis-save-btn"
-        style="flex:1;background:#2563eb;color:#fff;border:none;border-radius:8px;padding:8px 10px;cursor:pointer;font-size:12px;font-weight:600;"
+        style="background:#2563eb;color:#fff;border:none;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:11px;font-weight:600;min-width:0;min-height:0;"
         ${insightCount ? '' : 'disabled'}
       >Add to sidebar</button>
-      <button
-        type="button"
-        id="rc-analysis-dismiss-btn"
-        style="background:rgba(148,163,184,0.18);color:#f8fafc;border:none;border-radius:8px;padding:8px 10px;cursor:pointer;font-size:12px;"
-      >Dismiss</button>
     </div>
     <div
       id="rc-analysis-status"
@@ -206,7 +201,6 @@ function showInsightNotification(result) {
   updateToastPositions();
 
   const saveButton = toastEl.querySelector('#rc-analysis-save-btn');
-  const dismissButton = toastEl.querySelector('#rc-analysis-dismiss-btn');
   const closeButton = toastEl.querySelector('#rc-analysis-close-btn');
   const statusEl = toastEl.querySelector('#rc-analysis-status');
 
@@ -214,15 +208,11 @@ function showInsightNotification(result) {
     dismissAnalysisToast(toastEl);
   });
 
-  dismissButton?.addEventListener('click', () => {
-    dismissAnalysisToast(toastEl);
-  });
-
   saveButton?.addEventListener('click', async () => {
     await persistAnalysisInsights(result, {
       toastEl,
       saveButton,
-      dismissButton,
+      dismissButton: null,
       closeButton,
       statusEl,
     });
