@@ -7,7 +7,10 @@
     "storage",
     "tabs",
     "activeTab",
-    "sidePanel"
+    "sidePanel",
+    "alarms",
+    "idle",
+    "notifications"
   ],
   "host_permissions": [
     "<all_urls>",

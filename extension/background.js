@@ -1,9 +1,30 @@
+import { evaluateDrift } from './driftDetector.js';
+import { notifyDrift, shouldSendNotification } from './notificationManager.js';
+import { scorePageRelevance } from './relevanceScorer.js';
+import {
+  addManualOverride,
+  createActiveSession,
+  createDefaultBrowsingState,
+  createDefaultDriftState,
+  DEFAULT_DRIFT_SETTINGS,
+  ensureDriftStateInitialized,
+  getDriftBundle,
+  hasManualOverride,
+  resetDriftForSessionEnd,
+  setActiveSession,
+  setBrowsingState,
+  setDriftState,
+} from './sessionStore.js';
+
 const DEFAULT_SETTINGS = {
   backendUrl: 'http://localhost:8000',
   autoAnalyze: true,
   maxContentLength: 12000,
-  uiFontSize: 14
+  uiFontSize: 14,
 };
+
+const DRIFT_ALARM_NAME = 'drift-tick';
+let currentIdleState = 'active';
 
 function createEmptySession() {
   return {
@@ -15,7 +36,7 @@ function createEmptySession() {
     paused: false,
     pausedAt: null,
     createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
   };
 }
 
@@ -27,12 +48,45 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (!existing.session) {
     await chrome.storage.local.set({ session: createEmptySession() });
   }
+  await ensureDriftStateInitialized();
+  await ensureDriftAlarm();
+});
+
+chrome.runtime.onStartup.addListener(async () => {
+  await ensureDriftStateInitialized();
+  await ensureDriftAlarm();
 });
 
 chrome.action.onClicked.addListener(async (tab) => {
   if (tab?.windowId) {
     await chrome.sidePanel.open({ windowId: tab.windowId });
   }
+});
+
+chrome.tabs.onActivated.addListener(async () => {
+  await syncActiveTabState('tabs.onActivated');
+});
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.status !== 'complete') return;
+  if (!tab?.active) return;
+  await syncActiveTabState('tabs.onUpdated');
+});
+
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  await syncActiveTabState('windows.onFocusChanged');
+});
+
+chrome.idle.setDetectionInterval(60);
+chrome.idle.onStateChanged.addListener(async (state) => {
+  currentIdleState = state;
+  await runDriftTick('idle-state-change');
+});
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== DRIFT_ALARM_NAME) return;
+  await runDriftTick('alarm');
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -51,6 +105,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'CLEAR_SESSION': {
         const emptySession = createEmptySession();
         await chrome.storage.local.set({ session: emptySession });
+        await resetDriftForSessionEnd();
         sendResponse({ ok: true, data: emptySession });
         break;
       }
@@ -77,6 +132,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true, data: healthy });
         break;
       }
+      case 'USER_ACTIVITY_HEARTBEAT': {
+        const result = await handleUserActivityHeartbeat(message.payload, sender);
+        sendResponse({ ok: true, data: result });
+        break;
+      }
+      case 'MARK_PAGE_RELEVANT': {
+        const result = await handleMarkPageRelevant(message.payload, sender);
+        sendResponse({ ok: true, data: result });
+        break;
+      }
       default:
         sendResponse({ ok: false, error: 'Unknown message type' });
     }
@@ -87,6 +152,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   return true;
 });
+
+async function ensureDriftAlarm() {
+  const alarm = await chrome.alarms.get(DRIFT_ALARM_NAME);
+  if (!alarm) {
+    chrome.alarms.create(DRIFT_ALARM_NAME, { periodInMinutes: 1 });
+  }
+}
 
 async function getSettings() {
   const stored = await chrome.storage.local.get(['settings']);
@@ -105,12 +177,21 @@ async function setSession(session) {
   return session;
 }
 
+function isSessionActive(session) {
+  return Boolean(session?.goal) && !Boolean(session?.paused);
+}
+
+function logDrift(enabled, ...args) {
+  if (!enabled) return;
+  console.log('[drift]', ...args);
+}
+
 async function startSession(payload) {
   const settings = await getSettings();
   const response = await fetch(`${settings.backendUrl}/session/init`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
   });
 
   if (!response.ok) {
@@ -127,10 +208,21 @@ async function startSession(payload) {
     paused: false,
     pausedAt: null,
     createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
   };
 
   await setSession(session);
+
+  const activeSession = createActiveSession({
+    goal: session.goal,
+    questions: session.questions,
+    createdAt: session.createdAt,
+  });
+  await setActiveSession(activeSession);
+  await setBrowsingState(createDefaultBrowsingState(Date.now()));
+  await setDriftState(createDefaultDriftState(Date.now()));
+  await syncActiveTabState('start-session');
+
   return session;
 }
 
@@ -162,9 +254,9 @@ async function handlePageContent(payload, sender) {
       questions: session.questions,
       page: {
         ...payload,
-        content: payload.content.slice(0, settings.maxContentLength)
-      }
-    })
+        content: payload.content.slice(0, settings.maxContentLength),
+      },
+    }),
   });
 
   if (!response.ok) {
@@ -176,7 +268,7 @@ async function handlePageContent(payload, sender) {
     url: payload.url,
     title: payload.title,
     domain: safeDomain(payload.url),
-    analyzedAt: new Date().toISOString()
+    analyzedAt: new Date().toISOString(),
   };
 
   const updatedInsights = mergeInsights(session.insights, analysis.insights || [], source);
@@ -184,7 +276,7 @@ async function handlePageContent(payload, sender) {
     ...session,
     insights: updatedInsights,
     sources: mergeSources(session.sources, source),
-    missingTopics: analysis.missing_topics || session.missingTopics
+    missingTopics: analysis.missing_topics || session.missingTopics,
   };
 
   await setSession(updated);
@@ -194,9 +286,9 @@ async function handlePageContent(payload, sender) {
     try {
       await chrome.tabs.sendMessage(activeTabId, {
         type: 'PAGE_ANALYSIS_RESULT',
-        payload: analysis
+        payload: analysis,
       });
-    } catch (err) {
+    } catch {
       // Ignore if content script is unavailable.
     }
   }
@@ -214,11 +306,275 @@ async function toggleSessionPause(paused) {
   const updated = {
     ...session,
     paused: shouldPause,
-    pausedAt: shouldPause ? new Date().toISOString() : null
+    pausedAt: shouldPause ? new Date().toISOString() : null,
   };
 
   await setSession(updated);
+
+  if (shouldPause) {
+    const { activeSession } = await getDriftBundle();
+    if (activeSession) {
+      await setActiveSession({ ...activeSession, isActive: false });
+    }
+  } else {
+    const newActive = createActiveSession({
+      goal: updated.goal,
+      questions: updated.questions,
+      createdAt: updated.createdAt,
+    });
+    await setActiveSession(newActive);
+    await syncActiveTabState('resume-session');
+  }
+
   return updated;
+}
+
+async function handleUserActivityHeartbeat(payload, sender) {
+  const { browsingState, activeSession, driftSettings } = await getDriftBundle();
+  if (!activeSession?.isActive) {
+    return { skipped: true, reason: 'No active drift session' };
+  }
+
+  const now = Date.now();
+  const tab = sender?.tab;
+  const updated = {
+    ...browsingState,
+    lastUserActivityAt: now,
+  };
+
+  if (tab?.id && tab.id === updated.currentTabId) {
+    updated.currentUrl = payload?.url || tab.url || updated.currentUrl;
+    updated.currentDomain = safeDomain(updated.currentUrl || '');
+    updated.currentTitle = payload?.title || tab.title || updated.currentTitle;
+    if (payload?.snippet) {
+      updated.currentSnippet = String(payload.snippet).slice(0, 1200);
+    }
+  }
+
+  await setBrowsingState(updated);
+  logDrift(driftSettings.debug, 'heartbeat', { tabId: tab?.id, state: currentIdleState });
+
+  return { updatedAt: now };
+}
+
+async function handleMarkPageRelevant(payload, sender) {
+  const { activeSession, driftSettings } = await getDriftBundle();
+  if (!activeSession?.id) {
+    return { marked: false, reason: 'No active session id' };
+  }
+
+  const url = payload?.url || sender?.tab?.url;
+  if (!url) {
+    return { marked: false, reason: 'No URL to mark' };
+  }
+
+  await addManualOverride(activeSession.id, url);
+  logDrift(driftSettings.debug, 'manual override added', { url, sessionId: activeSession.id });
+  return { marked: true };
+}
+
+async function syncActiveTabState(reason) {
+  const session = await getSession();
+  if (!isSessionActive(session)) return;
+
+  const { browsingState, driftSettings, activeSession } = await getDriftBundle();
+  if (!activeSession?.isActive) return;
+
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!activeTab?.id || !activeTab.url) return;
+
+  const now = Date.now();
+  const samePage =
+    browsingState.currentTabId === activeTab.id &&
+    browsingState.currentUrl === activeTab.url;
+
+  if (samePage) {
+    const refreshed = {
+      ...browsingState,
+      currentTitle: activeTab.title || browsingState.currentTitle,
+      currentDomain: safeDomain(activeTab.url),
+      lastUserActivityAt: now,
+    };
+    await setBrowsingState(refreshed);
+    return;
+  }
+
+  const history = finalizeCurrentHistoryItem(browsingState.recentHistory || [], now);
+  history.push({
+    tabId: activeTab.id,
+    url: activeTab.url,
+    domain: safeDomain(activeTab.url),
+    title: activeTab.title || '',
+    startedAt: now,
+    endedAt: null,
+    dwellMs: 0,
+    relevanceScore: 0,
+    relevanceLabel: 'unknown',
+    isDistraction: false,
+    distractionCategory: null,
+  });
+
+  const maxItems = driftSettings.maxRecentHistoryItems || DEFAULT_DRIFT_SETTINGS.maxRecentHistoryItems;
+  const trimmed = history.slice(-maxItems);
+
+  const updated = {
+    ...browsingState,
+    currentTabId: activeTab.id,
+    currentUrl: activeTab.url,
+    currentDomain: safeDomain(activeTab.url),
+    currentTitle: activeTab.title || '',
+    currentSnippet: '',
+    currentTabStartedAt: now,
+    lastUserActivityAt: now,
+    recentHistory: trimmed,
+  };
+
+  await setBrowsingState(updated);
+  logDrift(driftSettings.debug, 'tab synced', { reason, url: activeTab.url, domain: updated.currentDomain });
+}
+
+function finalizeCurrentHistoryItem(history, now) {
+  if (!history.length) return history;
+  const clone = [...history];
+  const index = clone.findLastIndex((x) => x.endedAt == null);
+  if (index === -1) return clone;
+
+  const item = clone[index];
+  const startedAt = item.startedAt || now;
+  clone[index] = {
+    ...item,
+    endedAt: now,
+    dwellMs: Math.max(0, now - startedAt),
+  };
+  return clone;
+}
+
+async function runDriftTick(trigger) {
+  // TODO: Add lightweight session analytics counters for drift events over time.
+  const session = await getSession();
+  if (!isSessionActive(session)) return;
+
+  const bundle = await getDriftBundle();
+  const { driftSettings } = bundle;
+  if (!driftSettings.enabled) return;
+
+  let activeSession = bundle.activeSession;
+  if (!activeSession?.isActive) {
+    activeSession = createActiveSession({
+      goal: session.goal,
+      questions: session.questions,
+      createdAt: session.createdAt,
+    });
+    await setActiveSession(activeSession);
+  }
+
+  await syncActiveTabState(`tick:${trigger}`);
+
+  const refreshed = await getDriftBundle();
+  const browsingState = refreshed.browsingState;
+  const driftState = refreshed.driftState;
+  const manualRelevanceOverrides = refreshed.manualRelevanceOverrides;
+  const now = Date.now();
+
+  if (!browsingState.currentUrl) {
+    logDrift(driftSettings.debug, 'tick skipped: no current url');
+    return;
+  }
+
+  const manualOverride = hasManualOverride({
+    manualRelevanceOverrides,
+    sessionId: activeSession.id,
+    url: browsingState.currentUrl,
+  });
+
+  const relevance = scorePageRelevance({
+    goal: activeSession.goal,
+    keywords: activeSession.keywords,
+    researchQuestions: activeSession.researchQuestions,
+    url: browsingState.currentUrl,
+    domain: browsingState.currentDomain,
+    title: browsingState.currentTitle,
+    snippet: browsingState.currentSnippet,
+    manualOverride,
+  });
+
+  const updatedHistory = [...(browsingState.recentHistory || [])];
+  const activeIndex = updatedHistory.findLastIndex((x) => x.endedAt == null);
+  if (activeIndex >= 0) {
+    const startedAt = updatedHistory[activeIndex].startedAt || now;
+    updatedHistory[activeIndex] = {
+      ...updatedHistory[activeIndex],
+      title: browsingState.currentTitle || updatedHistory[activeIndex].title,
+      domain: browsingState.currentDomain || updatedHistory[activeIndex].domain,
+      dwellMs: Math.max(0, now - startedAt),
+      relevanceScore: relevance.score,
+      relevanceLabel: relevance.label,
+      isDistraction: relevance.isDistraction,
+      distractionCategory: relevance.distractionCategory,
+    };
+  }
+
+  const newBrowsingState = {
+    ...browsingState,
+    recentHistory: updatedHistory,
+    currentRelevanceScore: relevance.score,
+    currentRelevanceLabel: relevance.label,
+    currentDistractionCategory: relevance.distractionCategory,
+  };
+
+  const evaluation = evaluateDrift({
+    activeSession,
+    browsingState: newBrowsingState,
+    idleState: currentIdleState,
+    driftSettings,
+    now,
+    currentPage: {
+      url: newBrowsingState.currentUrl,
+      relevanceScore: relevance.score,
+      relevanceLabel: relevance.label,
+      isDistraction: relevance.isDistraction,
+      distractionCategory: relevance.distractionCategory,
+    },
+  });
+
+  const canNotify = shouldSendNotification({
+    driftState,
+    evaluation,
+    driftSettings,
+    now,
+  });
+
+  const nextDriftState = {
+    status: evaluation.status,
+    score: evaluation.score,
+    reasons: evaluation.reasons,
+    lastUpdatedAt: now,
+    lastNotificationAt: driftState.lastNotificationAt || null,
+    lastNotificationType: driftState.lastNotificationType || null,
+  };
+
+  if (canNotify) {
+    await notifyDrift({
+      evaluation,
+      goal: activeSession.goal,
+      currentTabId: newBrowsingState.currentTabId,
+    });
+    nextDriftState.lastNotificationAt = now;
+    nextDriftState.lastNotificationType = evaluation.notificationType;
+  }
+
+  await setBrowsingState(newBrowsingState);
+  await setDriftState(nextDriftState);
+
+  logDrift(driftSettings.debug, 'tick', {
+    trigger,
+    idle: currentIdleState,
+    score: relevance.score,
+    label: relevance.label,
+    status: evaluation.status,
+    reasons: evaluation.reasons,
+    notify: canNotify,
+  });
 }
 
 function insightKey(item) {
@@ -234,7 +590,7 @@ function mergeInsights(existing, incoming, source) {
       normalized.push({
         ...item,
         addedAt: new Date().toISOString(),
-        sources: [source]
+        sources: [source],
       });
     } else {
       const existingSources = Array.isArray(normalized[index].sources) ? normalized[index].sources : [];
@@ -242,7 +598,7 @@ function mergeInsights(existing, incoming, source) {
       if (!alreadyLinked) {
         normalized[index] = {
           ...normalized[index],
-          sources: [...existingSources, source]
+          sources: [...existingSources, source],
         };
       }
     }
