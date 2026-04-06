@@ -52,45 +52,192 @@ function createBaseToast() {
 
 function updateToastPositions() {
   if (analysisToast) analysisToast.style.bottom = '20px';
-  if (driftToast) driftToast.style.bottom = analysisToast ? '162px' : '20px';
+  if (driftToast) {
+    driftToast.style.bottom = analysisToast
+      ? `${analysisToast.offsetHeight + 32}px`
+      : '20px';
+  }
 }
 
-function showAnalysisToast(result) {
-  if (!result?.page_summary) return;
+function dismissAnalysisToast(toastEl = analysisToast) {
+  if (!toastEl) return;
 
-  if (analysisToast) analysisToast.remove();
-  if (analysisToastTimeout) clearTimeout(analysisToastTimeout);
+  if (toastEl !== analysisToast) {
+    toastEl.remove();
+    return;
+  }
+
+  if (analysisToastTimeout) {
+    clearTimeout(analysisToastTimeout);
+    analysisToastTimeout = null;
+  }
+
+  analysisToast.remove();
+  analysisToast = null;
+  updateToastPositions();
+}
+
+async function persistAnalysisInsights(result, controls) {
+  const { toastEl, saveButton, dismissButton, closeButton, statusEl } = controls;
+  if (!saveButton || saveButton.dataset.state === 'saving' || saveButton.dataset.state === 'saved') {
+    return;
+  }
+
+  saveButton.dataset.state = 'saving';
+  saveButton.disabled = true;
+  if (dismissButton) dismissButton.disabled = true;
+  if (closeButton) closeButton.disabled = true;
+  saveButton.textContent = 'Saving...';
+
+  if (toastEl === analysisToast && analysisToastTimeout) {
+    clearTimeout(analysisToastTimeout);
+    analysisToastTimeout = null;
+  }
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'SAVE_ANALYSIS_INSIGHTS',
+      payload: {
+        insights: Array.isArray(result?.insights) ? result.insights : [],
+        page: {
+          url: window.location.href,
+          title: document.title,
+        },
+      },
+    });
+
+    if (!response?.ok) {
+      throw new Error(response?.error || 'Insight save failed');
+    }
+
+    if (toastEl !== analysisToast) return;
+
+    const addedCount = Number(response.data?.addedCount || 0);
+    saveButton.dataset.state = 'saved';
+    saveButton.textContent = 'Added';
+    statusEl.style.display = 'block';
+    statusEl.style.color = '#86efac';
+    statusEl.textContent = addedCount > 1
+      ? `Added ${addedCount} insights to sidebar`
+      : addedCount === 1
+        ? 'Added to sidebar'
+        : 'Already in sidebar';
+    updateToastPositions();
+
+    scheduleAnalysisToastDismiss(1400, toastEl);
+  } catch (error) {
+    if (toastEl !== analysisToast) return;
+
+    saveButton.dataset.state = 'idle';
+    saveButton.disabled = false;
+    if (dismissButton) dismissButton.disabled = false;
+    if (closeButton) closeButton.disabled = false;
+    saveButton.textContent = 'Add to sidebar';
+    statusEl.style.display = 'block';
+    statusEl.style.color = '#fca5a5';
+    statusEl.textContent = 'Could not save insight';
+    updateToastPositions();
+    console.debug('Could not save analysis insights', error);
+  }
+}
+
+function showInsightNotification(result) {
+  const insights = Array.isArray(result?.insights) ? result.insights : [];
+  const summaryText = result?.page_summary || insights[0]?.summary;
+  if (!summaryText) return;
+
+  if (analysisToast) {
+    dismissAnalysisToast();
+  }
 
   analysisToast = createBaseToast();
-  analysisToast.innerHTML = `
-    <div style="font-weight:600;margin-bottom:8px;">Research Copilot</div>
-    <div style="font-size:13px;line-height:1.4;margin-bottom:6px;">${escapeHtml(result.page_summary)}</div>
-    <div style="font-size:12px;color:#cbd5e1;">Topic: ${escapeHtml(result.primary_topic || 'General')}</div>
+  const toastEl = analysisToast;
+
+  const insightCount = insights.length;
+  const insightCountText = insightCount
+    ? `${insightCount} insight${insightCount === 1 ? '' : 's'} ready to save`
+    : 'Insight ready to save';
+
+  toastEl.innerHTML = `
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:8px;">
+      <div style="font-weight:600;">Research Copilot</div>
+      <button
+        type="button"
+        id="rc-analysis-close-btn"
+        aria-label="Dismiss insight"
+        style="background:transparent;color:#cbd5e1;border:none;padding:0;cursor:pointer;font-size:18px;line-height:1;"
+      >×</button>
+    </div>
+    <div style="font-size:13px;line-height:1.4;margin-bottom:6px;">${escapeHtml(summaryText)}</div>
+    <div style="font-size:12px;color:#cbd5e1;margin-bottom:6px;">Topic: ${escapeHtml(result?.primary_topic || insights[0]?.topic || 'General')}</div>
+    <div style="font-size:12px;color:#93c5fd;margin-bottom:10px;">${escapeHtml(insightCountText)}</div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button
+        type="button"
+        id="rc-analysis-save-btn"
+        style="flex:1;background:#2563eb;color:#fff;border:none;border-radius:8px;padding:8px 10px;cursor:pointer;font-size:12px;font-weight:600;"
+        ${insightCount ? '' : 'disabled'}
+      >Add to sidebar</button>
+      <button
+        type="button"
+        id="rc-analysis-dismiss-btn"
+        style="background:rgba(148,163,184,0.18);color:#f8fafc;border:none;border-radius:8px;padding:8px 10px;cursor:pointer;font-size:12px;"
+      >Dismiss</button>
+    </div>
+    <div
+      id="rc-analysis-status"
+      style="display:none;font-size:12px;margin-top:8px;"
+      aria-live="polite"
+    ></div>
   `;
 
-  analysisToast.addEventListener('mouseenter', () => {
+  toastEl.addEventListener('mouseenter', () => {
     if (analysisToastTimeout) {
       clearTimeout(analysisToastTimeout);
       analysisToastTimeout = null;
     }
   });
 
-  analysisToast.addEventListener('mouseleave', () => {
-    scheduleAnalysisToastDismiss(5000);
+  toastEl.addEventListener('mouseleave', () => {
+    scheduleAnalysisToastDismiss(5000, toastEl);
   });
 
-  document.body.appendChild(analysisToast);
+  document.body.appendChild(toastEl);
   updateToastPositions();
-  scheduleAnalysisToastDismiss(15000);
+
+  const saveButton = toastEl.querySelector('#rc-analysis-save-btn');
+  const dismissButton = toastEl.querySelector('#rc-analysis-dismiss-btn');
+  const closeButton = toastEl.querySelector('#rc-analysis-close-btn');
+  const statusEl = toastEl.querySelector('#rc-analysis-status');
+
+  closeButton?.addEventListener('click', () => {
+    dismissAnalysisToast(toastEl);
+  });
+
+  dismissButton?.addEventListener('click', () => {
+    dismissAnalysisToast(toastEl);
+  });
+
+  saveButton?.addEventListener('click', async () => {
+    await persistAnalysisInsights(result, {
+      toastEl,
+      saveButton,
+      dismissButton,
+      closeButton,
+      statusEl,
+    });
+  });
+
+  scheduleAnalysisToastDismiss(15000, toastEl);
 }
 
-function scheduleAnalysisToastDismiss(delayMs) {
+function scheduleAnalysisToastDismiss(delayMs, toastEl = analysisToast) {
+  if (toastEl !== analysisToast) return;
   if (analysisToastTimeout) clearTimeout(analysisToastTimeout);
   analysisToastTimeout = setTimeout(() => {
-    analysisToast?.remove();
-    analysisToast = null;
-    analysisToastTimeout = null;
-    updateToastPositions();
+    if (analysisToast === toastEl) {
+      dismissAnalysisToast(toastEl);
+    }
   }, delayMs);
 }
 
@@ -191,7 +338,7 @@ async function sendActivityHeartbeat(force = false) {
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'PAGE_ANALYSIS_RESULT') {
-    showAnalysisToast(message.payload);
+    showInsightNotification(message.payload);
   }
   if (message.type === 'SHOW_DRIFT_TOAST') {
     showDriftToast(message.payload || {});

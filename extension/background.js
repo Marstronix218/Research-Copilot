@@ -119,6 +119,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true, data: result });
         break;
       }
+      case 'SAVE_ANALYSIS_INSIGHTS': {
+        const result = await saveAnalysisInsights(message.payload, sender);
+        sendResponse({ ok: true, data: result });
+        break;
+      }
       case 'SAVE_SETTINGS': {
         const current = await chrome.storage.local.get(['settings']);
         const settings = { ...(current.settings || DEFAULT_SETTINGS), ...message.payload };
@@ -271,10 +276,8 @@ async function handlePageContent(payload, sender) {
     analyzedAt: new Date().toISOString(),
   };
 
-  const updatedInsights = mergeInsights(session.insights, analysis.insights || [], source);
   const updated = {
     ...session,
-    insights: updatedInsights,
     sources: mergeSources(session.sources, source),
     missingTopics: analysis.missing_topics || session.missingTopics,
   };
@@ -294,6 +297,49 @@ async function handlePageContent(payload, sender) {
   }
 
   return analysis;
+}
+
+async function saveAnalysisInsights(payload, sender) {
+  const session = await getSession();
+  if (!session?.goal) {
+    return { saved: false, addedCount: 0, reason: 'No active research session' };
+  }
+
+  const insights = Array.isArray(payload?.insights) ? payload.insights : [];
+  if (!insights.length) {
+    return { saved: false, addedCount: 0, reason: 'No insights to save' };
+  }
+
+  const sourceUrl = payload?.page?.url || sender?.tab?.url || '';
+  const sourceTitle = payload?.page?.title || sender?.tab?.title || '';
+  const source = {
+    url: sourceUrl,
+    title: sourceTitle,
+    domain: safeDomain(sourceUrl),
+    analyzedAt: new Date().toISOString(),
+  };
+
+  const existingInsights = Array.isArray(session.insights) ? session.insights : [];
+  const existingSources = Array.isArray(session.sources) ? session.sources : [];
+  const updatedInsights = mergeInsights(existingInsights, insights, source);
+  const sourceAlreadyTracked = existingSources.some((item) => item.url === source.url);
+
+  if (updatedInsights.length === existingInsights.length && sourceAlreadyTracked) {
+    return { saved: true, addedCount: 0, session };
+  }
+
+  const updated = {
+    ...session,
+    insights: updatedInsights,
+    sources: mergeSources(existingSources, source),
+  };
+
+  await setSession(updated);
+  return {
+    saved: true,
+    addedCount: Math.max(0, updatedInsights.length - existingInsights.length),
+    session: updated,
+  };
 }
 
 async function toggleSessionPause(paused) {
