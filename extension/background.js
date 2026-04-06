@@ -310,12 +310,12 @@ async function handlePageContent(payload, sender) {
 async function saveAnalysisInsights(payload, sender) {
   const session = await getSession();
   if (!session?.goal) {
-    return { saved: false, addedCount: 0, reason: 'No active research session' };
+    throw new Error('No active research session');
   }
 
   const insights = Array.isArray(payload?.insights) ? payload.insights : [];
   if (!insights.length) {
-    return { saved: false, addedCount: 0, reason: 'No insights to save' };
+    throw new Error('No insights to save');
   }
 
   const sourceUrl = payload?.page?.url || sender?.tab?.url || '';
