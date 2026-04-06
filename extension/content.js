@@ -151,8 +151,12 @@ async function persistAnalysisInsights(result, controls) {
 
 function showInsightNotification(result) {
   const insights = Array.isArray(result?.insights) ? result.insights : [];
-  const summaryText = result?.page_summary || insights[0]?.summary;
-  if (!summaryText) return;
+  const hasInsights = insights.length > 0;
+  const summaryText =
+    result?.page_summary ||
+    insights[0]?.summary ||
+    (hasInsights ? 'Insights are ready to save.' : '');
+  if (!summaryText && !hasInsights) return;
 
   if (analysisToast) {
     dismissAnalysisToast();
