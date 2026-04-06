@@ -27,6 +27,22 @@ body {
   width: 360px;
 }
 
+.popup-launcher {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.popup-launcher-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.popup-launcher-card button {
+  width: 100%;
+}
+
 .container,
 .sidebar-shell {
   padding: 16px;
@@ -666,7 +682,7 @@ button.danger {
 
 .tab-bar {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
   gap: 6px;
   padding: 4px;
   border-radius: 12px;
@@ -680,7 +696,8 @@ button.danger {
   background: transparent;
   color: var(--muted);
   font-size: 12px;
-  white-space: nowrap;
+  white-space: normal;
+  line-height: 1.25;
 }
 
 .tab-btn.active {
@@ -743,11 +760,22 @@ button.danger {
   gap: 14px;
 }
 
+.overview-entry-card {
+  gap: 16px;
+}
+
 .overview-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.overview-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .overview-title-block {
@@ -769,6 +797,11 @@ button.danger {
   gap: 6px;
 }
 
+.overview-goal-block textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
 .overview-section-label {
   color: var(--muted);
   font-size: 11px;
@@ -784,6 +817,31 @@ button.danger {
 
 .overview-actions {
   padding-top: 2px;
+}
+
+.overview-danger-row {
+  padding-top: 2px;
+}
+
+.clarification-card,
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-form label {
+  font-weight: 500;
+}
+
+.settings-range-row {
+  align-items: center;
 }
 
 .compact-list {

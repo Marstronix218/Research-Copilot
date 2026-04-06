@@ -3,7 +3,13 @@ const insightGroupingApi = globalThis.ResearchCopilotInsightGrouping;
 const SIDEBAR_UI_STATE_KEY = 'sidebarUiState';
 const DEFAULT_TAB = 'overview';
 const DEFAULT_INSIGHTS_VIEW = 'grouped';
-const VALID_TABS = new Set(['overview', 'insights', 'questions', 'sources']);
+const SESSION_DRAFT_CONTEXT = 'new-session';
+const DEFAULT_SETTINGS = {
+  backendUrl: 'http://localhost:8000',
+  autoAnalyze: true,
+  uiFontSize: 14,
+};
+const VALID_TABS = new Set(['overview', 'insights', 'questions', 'sources', 'settings']);
 const STATE_STORAGE_KEYS = [
   'settings',
   'currentSessionId',
@@ -22,6 +28,21 @@ const RELEVANT_STORAGE_KEYS = new Set([
 let previousInsightKeys = new Set();
 let currentSession = null;
 let currentSessionId = null;
+let allSessions = [];
+let currentSettings = { ...DEFAULT_SETTINGS };
+let settingsDraft = { ...DEFAULT_SETTINGS };
+let settingsDraftDirty = false;
+let backendHealth = { healthy: null, error: '', checking: false };
+let goalEditorState = { contextKey: null, value: '', dirty: false };
+let newSessionGoalDraft = '';
+let newSessionComposerOpen = false;
+let overviewActionPending = false;
+let overviewMode = 'default';
+let overviewError = '';
+let clarificationPending = false;
+let clarificationChatError = '';
+let clarificationAnswerDraft = '';
+let activeContextSyncPromise = Promise.resolve();
 let selectedTab = DEFAULT_TAB;
 let insightsViewMode = DEFAULT_INSIGHTS_VIEW;
 let groupedViewAvailable = Boolean(insightGroupingApi?.prepareInsightViewModel);
@@ -33,20 +54,15 @@ let persistUiStatePromise = Promise.resolve();
 let sessionMenuOpen = false;
 let scheduledRefreshHandle = null;
 
-const updatedAtEl = document.getElementById('updatedAt');
 const sessionSwitcherSectionEl = document.querySelector('.session-switcher-section');
 const sessionSwitcherBtn = document.getElementById('sessionSwitcherBtn');
 const sessionSwitcherLabelEl = document.getElementById('sessionSwitcherLabel');
 const sessionSwitcherMetaEl = document.getElementById('sessionSwitcherMeta');
 const sessionDropdownMenuEl = document.getElementById('sessionDropdownMenu');
-const newSessionComposerEl = document.getElementById('newSessionComposer');
-const newSessionGoalInputEl = document.getElementById('newSessionGoalInput');
-const newSessionErrorEl = document.getElementById('newSessionError');
-const startNewSessionBtn = document.getElementById('startNewSessionBtn');
-const cancelNewSessionBtn = document.getElementById('cancelNewSessionBtn');
 const overviewTabContentEl = document.getElementById('overviewTabContent');
 const questionsTabContentEl = document.getElementById('questionsTabContent');
 const sourcesTabContentEl = document.getElementById('sourcesTabContent');
+const settingsTabContentEl = document.getElementById('settingsTabContent');
 const groupedInsightsBtn = document.getElementById('groupedInsightsBtn');
 const timelineInsightsBtn = document.getElementById('timelineInsightsBtn');
 const insightsMetaEl = document.getElementById('insightsMeta');
@@ -58,7 +74,10 @@ const tabPanels = {
   insights: document.getElementById('insightsTabPanel'),
   questions: document.getElementById('questionsTabPanel'),
   sources: document.getElementById('sourcesTabPanel'),
+  settings: document.getElementById('settingsTabPanel'),
 };
+
+const clarificationState = createEmptyClarificationState();
 
 async function sendMessage(type, payload = {}) {
   const response = await chrome.runtime.sendMessage({ type, payload });
@@ -170,6 +189,232 @@ function applyFontSize(sizePx) {
 function setTextContent(element, value) {
   if (!element) return;
   element.textContent = value;
+}
+
+function normalizeSettings(value = {}) {
+  const settings = value && typeof value === 'object' ? value : {};
+  const backendUrl = String(settings.backendUrl || DEFAULT_SETTINGS.backendUrl).trim()
+    || DEFAULT_SETTINGS.backendUrl;
+
+  return {
+    ...DEFAULT_SETTINGS,
+    ...settings,
+    backendUrl,
+    autoAnalyze: settings.autoAnalyze == null
+      ? DEFAULT_SETTINGS.autoAnalyze
+      : Boolean(settings.autoAnalyze),
+    uiFontSize: normalizeFontSize(settings.uiFontSize ?? DEFAULT_SETTINGS.uiFontSize),
+  };
+}
+
+function settingsAreEqual(left, right) {
+  return left.backendUrl === right.backendUrl
+    && left.autoAnalyze === right.autoAnalyze
+    && left.uiFontSize === right.uiFontSize;
+}
+
+function createEmptyClarificationState() {
+  return {
+    contextKey: null,
+    roughGoal: '',
+    chatHistory: [],
+    answers: [],
+    clarifiedGoal: null,
+    rationale: null,
+    isGoalConfirmed: false,
+  };
+}
+
+function resetClarificationState({ contextKey = null } = {}) {
+  clarificationState.contextKey = contextKey;
+  clarificationState.roughGoal = '';
+  clarificationState.chatHistory = [];
+  clarificationState.answers = [];
+  clarificationState.clarifiedGoal = null;
+  clarificationState.rationale = null;
+  clarificationState.isGoalConfirmed = false;
+  clarificationPending = false;
+  clarificationChatError = '';
+  clarificationAnswerDraft = '';
+  overviewMode = 'default';
+}
+
+async function clearClarificationDraftStorage() {
+  await chrome.storage.local.remove([
+    'researchSessionDraft',
+    'activeResearchGoal',
+    'originalResearchGoal',
+  ]);
+}
+
+async function saveClarificationDraft() {
+  if (!clarificationState.contextKey) return;
+
+  await chrome.storage.local.set({
+    researchSessionDraft: {
+      contextKey: clarificationState.contextKey,
+      roughGoal: clarificationState.roughGoal,
+      clarificationChat: clarificationState.chatHistory,
+      clarifiedGoal: clarificationState.clarifiedGoal,
+      rationale: clarificationState.rationale,
+      isGoalConfirmed: clarificationState.isGoalConfirmed,
+    },
+  });
+}
+
+async function loadClarificationDraft(contextKey, fallbackGoal = '') {
+  resetClarificationState({ contextKey });
+
+  const data = await chrome.storage.local.get(['researchSessionDraft']);
+  const draft = data.researchSessionDraft;
+  if (!draft) {
+    return;
+  }
+
+  const storedContextKey = draft.contextKey || null;
+  const shouldUseLegacyDraft = !storedContextKey
+    && (
+      contextKey === SESSION_DRAFT_CONTEXT
+      || String(draft.roughGoal || '').trim() === String(fallbackGoal || '').trim()
+      || String(draft.clarifiedGoal || '').trim() === String(fallbackGoal || '').trim()
+    );
+
+  if (storedContextKey && storedContextKey !== contextKey && !shouldUseLegacyDraft) {
+    return;
+  }
+
+  if (!storedContextKey && !shouldUseLegacyDraft) {
+    return;
+  }
+
+  clarificationState.contextKey = contextKey;
+  clarificationState.roughGoal = String(draft.roughGoal || '').trim();
+  clarificationState.chatHistory = Array.isArray(draft.clarificationChat) ? draft.clarificationChat : [];
+  clarificationState.clarifiedGoal = draft.clarifiedGoal || null;
+  clarificationState.rationale = draft.rationale || null;
+  clarificationState.isGoalConfirmed = Boolean(draft.isGoalConfirmed);
+  clarificationState.answers = clarificationState.chatHistory
+    .filter((message) => message.role === 'user')
+    .map((message) => message.text);
+}
+
+function getClarificationQuestionCount() {
+  return clarificationState.chatHistory.filter((message) => message.role === 'assistant').length;
+}
+
+function isOverviewDraftMode(session = currentSession) {
+  return newSessionComposerOpen || !session?.id;
+}
+
+function getOverviewContextKey(session = currentSession) {
+  return isOverviewDraftMode(session)
+    ? SESSION_DRAFT_CONTEXT
+    : `session:${session.id}`;
+}
+
+function getStoredGoalForCurrentContext(session = currentSession) {
+  if (isOverviewDraftMode(session)) {
+    return newSessionGoalDraft;
+  }
+  return session?.goal || '';
+}
+
+function getGoalValueForContext(session = currentSession) {
+  const fallback = getStoredGoalForCurrentContext(session);
+  if (
+    clarificationState.contextKey === getOverviewContextKey(session)
+    && clarificationState.isGoalConfirmed
+    && clarificationState.clarifiedGoal
+  ) {
+    return clarificationState.clarifiedGoal;
+  }
+
+  if (
+    clarificationState.contextKey === SESSION_DRAFT_CONTEXT
+    && isOverviewDraftMode(session)
+    && clarificationState.roughGoal
+  ) {
+    return clarificationState.roughGoal;
+  }
+
+  return fallback;
+}
+
+function setGoalEditorState(contextKey, value, dirty = false) {
+  goalEditorState = {
+    contextKey,
+    value,
+    dirty,
+  };
+
+  if (contextKey === SESSION_DRAFT_CONTEXT) {
+    newSessionGoalDraft = value;
+  }
+}
+
+function updateGoalEditorValue(value, { dirty = true } = {}) {
+  setGoalEditorState(goalEditorState.contextKey, value, dirty);
+}
+
+function shouldMarkGoalEditorDirty(session, contextKey, value) {
+  if (contextKey === SESSION_DRAFT_CONTEXT) {
+    return false;
+  }
+
+  return String(value || '').trim() !== String(session?.goal || '').trim();
+}
+
+async function syncOverviewContext(session = currentSession) {
+  const contextKey = getOverviewContextKey(session);
+  const contextChanged = goalEditorState.contextKey !== contextKey
+    || clarificationState.contextKey !== contextKey;
+
+  if (contextChanged) {
+    setGoalEditorState(
+      contextKey,
+      getStoredGoalForCurrentContext(session),
+      shouldMarkGoalEditorDirty(session, contextKey, getStoredGoalForCurrentContext(session)),
+    );
+    await loadClarificationDraft(contextKey, getStoredGoalForCurrentContext(session));
+    const goalValue = getGoalValueForContext(session);
+    setGoalEditorState(
+      contextKey,
+      goalValue,
+      shouldMarkGoalEditorDirty(session, contextKey, goalValue),
+    );
+    return;
+  }
+
+  if (!goalEditorState.dirty) {
+    const goalValue = getGoalValueForContext(session);
+    setGoalEditorState(
+      contextKey,
+      goalValue,
+      shouldMarkGoalEditorDirty(session, contextKey, goalValue),
+    );
+  }
+}
+
+function queueContextSync(session = currentSession) {
+  activeContextSyncPromise = activeContextSyncPromise
+    .catch(() => {})
+    .then(() => syncOverviewContext(session));
+  return activeContextSyncPromise;
+}
+
+function clearOverviewError() {
+  overviewError = '';
+}
+
+function setOverviewError(message) {
+  overviewError = message || '';
+}
+
+function getEffectiveOverviewGoal() {
+  if (clarificationState.isGoalConfirmed && clarificationState.clarifiedGoal) {
+    return clarificationState.clarifiedGoal;
+  }
+  return String(goalEditorState.value || '').trim();
 }
 
 function createDefaultSessionUiState() {
@@ -554,36 +799,31 @@ function setSessionMenuOpen(isOpen) {
   sessionDropdownMenuEl.classList.toggle('hidden', !sessionMenuOpen);
 }
 
-function clearNewSessionError() {
-  setTextContent(newSessionErrorEl, '');
-  newSessionErrorEl.classList.add('hidden');
-}
-
-function setNewSessionError(message) {
-  setTextContent(newSessionErrorEl, message);
-  newSessionErrorEl.classList.toggle('hidden', !message);
-}
-
-function setNewSessionComposerOpen(isOpen) {
-  newSessionComposerEl.classList.toggle('hidden', !isOpen);
-  if (!isOpen) {
-    newSessionGoalInputEl.value = '';
-    clearNewSessionError();
-    setNewSessionSubmitting(false);
+async function setNewSessionComposerOpen(isOpen) {
+  if (!isOpen && !currentSession?.id) {
     return;
   }
 
+  newSessionComposerOpen = Boolean(isOpen);
   setSessionMenuOpen(false);
-  queueMicrotask(() => {
-    newSessionGoalInputEl.focus();
-  });
-}
+  clearOverviewError();
+  clarificationChatError = '';
+  clarificationAnswerDraft = '';
+  overviewMode = 'default';
 
-function setNewSessionSubmitting(isSubmitting) {
-  startNewSessionBtn.disabled = isSubmitting;
-  cancelNewSessionBtn.disabled = isSubmitting;
-  newSessionGoalInputEl.disabled = isSubmitting;
-  setTextContent(startNewSessionBtn, isSubmitting ? 'Starting…' : 'Start session');
+  if (newSessionComposerOpen) {
+    selectedTab = DEFAULT_TAB;
+    renderTabBar();
+  }
+
+  await queueContextSync(currentSession);
+  renderOverviewTab(currentSession);
+
+  if (newSessionComposerOpen) {
+    queueMicrotask(() => {
+      document.getElementById('overviewGoalInput')?.focus();
+    });
+  }
 }
 
 async function handleCurrentSessionAction(session) {
@@ -602,32 +842,429 @@ async function handleCurrentSessionAction(session) {
 async function handleDeleteSession(sessionId) {
   if (!sessionId) return;
   if (!window.confirm('Delete this research session from local storage?')) return;
+
+  if (clarificationState.contextKey === `session:${sessionId}`) {
+    resetClarificationState();
+    await clearClarificationDraftStorage();
+  }
+
   await sendMessage('DELETE_SESSION', { sessionId });
 }
 
 async function handleStartNewSession() {
-  const goal = newSessionGoalInputEl.value.trim();
+  const goal = getEffectiveOverviewGoal();
   if (!goal) {
-    setNewSessionError('Please enter a research goal first.');
+    setOverviewError('Please enter a research goal first.');
+    renderOverviewTab(currentSession);
     return;
   }
 
-  clearNewSessionError();
-  setNewSessionSubmitting(true);
+  clearOverviewError();
+  overviewActionPending = true;
+  renderOverviewTab(currentSession);
 
   try {
     const session = await sendMessage('START_SESSION', { goal });
     updateSessionUiState(session?.id, createDefaultSessionUiState());
+
+    if (clarificationState.isGoalConfirmed && clarificationState.clarifiedGoal) {
+      clarificationState.contextKey = `session:${session.id}`;
+      await saveClarificationDraft();
+    } else {
+      resetClarificationState({ contextKey: SESSION_DRAFT_CONTEXT });
+      await clearClarificationDraftStorage();
+    }
+
+    newSessionGoalDraft = '';
+    newSessionComposerOpen = false;
     selectedTab = DEFAULT_TAB;
     insightsViewMode = DEFAULT_INSIGHTS_VIEW;
     openClusterIds = new Set();
     forcedTimelineFallback = false;
-    setNewSessionComposerOpen(false);
     await refreshState(false);
   } catch (error) {
-    setNewSessionSubmitting(false);
-    setNewSessionError(error.message || 'Failed to start session.');
+    setOverviewError(error.message || 'Failed to start session.');
+    renderOverviewTab(currentSession);
+  } finally {
+    overviewActionPending = false;
+    renderOverviewTab(currentSession);
   }
+}
+
+async function handleSaveSessionGoal(session) {
+  const goal = getEffectiveOverviewGoal();
+  if (!goal) {
+    setOverviewError('Please enter a research goal first.');
+    renderOverviewTab(currentSession);
+    return;
+  }
+
+  overviewActionPending = true;
+  clearOverviewError();
+  renderOverviewTab(currentSession);
+
+  try {
+    await sendMessage('UPDATE_SESSION_GOAL', {
+      sessionId: session.id,
+      goal,
+    });
+
+    goalEditorState.dirty = false;
+    if (clarificationState.contextKey === getOverviewContextKey(session)) {
+      await saveClarificationDraft();
+    }
+
+    await refreshState(false);
+  } catch (error) {
+    setOverviewError(error.message || 'Failed to save the session goal.');
+    renderOverviewTab(currentSession);
+  } finally {
+    overviewActionPending = false;
+    renderOverviewTab(currentSession);
+  }
+}
+
+async function refreshBackendHealth({ rerender = true } = {}) {
+  backendHealth = { ...backendHealth, checking: true };
+  if (rerender) {
+    renderOverviewTab(currentSession);
+    renderSettingsTab();
+  }
+
+  try {
+    const result = await sendMessage('PING_BACKEND');
+    backendHealth = {
+      healthy: Boolean(result?.healthy),
+      error: result?.error || '',
+      checking: false,
+    };
+  } catch (error) {
+    backendHealth = {
+      healthy: false,
+      error: error.message || 'Failed to reach backend.',
+      checking: false,
+    };
+  }
+
+  if (rerender) {
+    renderOverviewTab(currentSession);
+    renderSettingsTab();
+  }
+}
+
+function updateSettingsFormUi() {
+  setTextContent(
+    document.getElementById('settingsFontValue'),
+    `${settingsDraft.uiFontSize}px`,
+  );
+
+  const saveBtn = document.getElementById('settingsSaveBtn');
+  if (saveBtn) {
+    saveBtn.textContent = settingsDraftDirty ? 'Save settings' : 'Saved';
+    saveBtn.disabled = !settingsDraftDirty && !backendHealth.error;
+  }
+
+  const refreshBtn = document.getElementById('settingsRefreshBtn');
+  if (refreshBtn) {
+    refreshBtn.disabled = backendHealth.checking || settingsDraftDirty;
+  }
+
+  document.getElementById('settingsDirtyNote')?.classList.toggle('hidden', !settingsDraftDirty);
+}
+
+function handleSettingsFieldChange(field, value) {
+  settingsDraft = {
+    ...settingsDraft,
+    [field]: value,
+  };
+  settingsDraftDirty = !settingsAreEqual(settingsDraft, currentSettings);
+
+  if (field === 'uiFontSize') {
+    applyFontSize(settingsDraft.uiFontSize);
+  }
+
+  updateSettingsFormUi();
+}
+
+async function handleSaveSettings() {
+  settingsDraft = normalizeSettings(settingsDraft);
+  settingsDraftDirty = false;
+  renderSettingsTab();
+
+  try {
+    const savedSettings = normalizeSettings(await sendMessage('SAVE_SETTINGS', settingsDraft));
+    currentSettings = savedSettings;
+    settingsDraft = { ...savedSettings };
+    applyFontSize(savedSettings.uiFontSize);
+    await refreshBackendHealth({ rerender: false });
+  } catch (error) {
+    settingsDraftDirty = true;
+    backendHealth = {
+      healthy: false,
+      error: error.message || 'Failed to save settings.',
+      checking: false,
+    };
+  }
+
+  renderOverviewTab(currentSession);
+  renderSettingsTab();
+}
+
+function getClarifyBackendUrl() {
+  return currentSettings.backendUrl || DEFAULT_SETTINGS.backendUrl;
+}
+
+function setOverviewMode(mode) {
+  overviewMode = mode;
+  renderOverviewTab(currentSession);
+}
+
+function getClarifyProgressLabel() {
+  const questionCount = getClarificationQuestionCount();
+  return questionCount > 0 ? `Question ${questionCount} of ~4` : '';
+}
+
+function isClarificationRelevantForCurrentContext() {
+  return clarificationState.contextKey === getOverviewContextKey(currentSession);
+}
+
+function maybeInvalidateClarificationFromGoalEdit(nextValue) {
+  if (!isClarificationRelevantForCurrentContext() || !clarificationState.isGoalConfirmed) {
+    return false;
+  }
+
+  if (nextValue.trim() === clarificationState.clarifiedGoal) {
+    return false;
+  }
+
+  resetClarificationState({ contextKey: getOverviewContextKey(currentSession) });
+  void clearClarificationDraftStorage();
+  return true;
+}
+
+function updateOverviewGoalEditorUi() {
+  const saveBtn = document.getElementById('overviewSaveGoalBtn');
+  if (saveBtn) {
+    saveBtn.disabled = !goalEditorState.dirty || overviewActionPending || clarificationPending;
+  }
+
+  document.getElementById('overviewGoalHint')?.classList.toggle('hidden', !goalEditorState.dirty);
+}
+
+function handleOverviewGoalInput(value) {
+  const hadOverviewError = Boolean(overviewError);
+  clearOverviewError();
+  const invalidatedClarification = maybeInvalidateClarificationFromGoalEdit(value);
+
+  if (isOverviewDraftMode(currentSession)) {
+    updateGoalEditorValue(value, { dirty: true });
+    if (hadOverviewError || invalidatedClarification) {
+      renderOverviewTab(currentSession);
+    }
+    return;
+  }
+
+  const nextDirty = value.trim() !== String(currentSession?.goal || '').trim();
+  updateGoalEditorValue(value, { dirty: nextDirty });
+
+  if (hadOverviewError || invalidatedClarification) {
+    renderOverviewTab(currentSession);
+    return;
+  }
+
+  updateOverviewGoalEditorUi();
+}
+
+function handleClarificationResponse(data) {
+  clarificationChatError = '';
+
+  if (data.status === 'complete') {
+    clarificationState.clarifiedGoal = data.clarifiedGoal;
+    clarificationState.rationale = data.rationale || null;
+    overviewMode = 'confirm';
+    return saveClarificationDraft();
+  }
+
+  if (data.status === 'needs_clarification' && data.message) {
+    clarificationState.chatHistory.push(data.message);
+    overviewMode = 'clarifying';
+    return saveClarificationDraft();
+  }
+
+  return Promise.resolve();
+}
+
+async function requestNextClarificationStep() {
+  clarificationPending = true;
+  clarificationChatError = '';
+  renderOverviewTab(currentSession);
+
+  try {
+    const response = await fetch(`${getClarifyBackendUrl()}/api/clarify-goal/next`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        roughGoal: clarificationState.roughGoal,
+        chatHistory: clarificationState.chatHistory,
+        answers: clarificationState.answers,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    await handleClarificationResponse(data);
+  } catch (error) {
+    clarificationChatError = 'Failed to get the next step. You can type a custom answer below to continue.';
+  } finally {
+    clarificationPending = false;
+    renderOverviewTab(currentSession);
+  }
+}
+
+async function handleClarificationAnswer(answer) {
+  const value = String(answer || '').trim();
+  if (!value) return;
+
+  clarificationChatError = '';
+  clarificationAnswerDraft = '';
+  clarificationState.chatHistory.push({ role: 'user', text: value });
+  clarificationState.answers.push(value);
+  await saveClarificationDraft();
+  await requestNextClarificationStep();
+}
+
+async function handleClarifyGoalClick() {
+  const roughGoal = String(goalEditorState.value || '').trim();
+  if (!roughGoal) {
+    setOverviewError('Please enter a research goal before clarifying.');
+    renderOverviewTab(currentSession);
+    return;
+  }
+
+  clearOverviewError();
+  const contextKey = getOverviewContextKey(currentSession);
+
+  if (
+    clarificationState.contextKey === contextKey
+    && clarificationState.roughGoal
+    && clarificationState.roughGoal !== roughGoal
+    && clarificationState.chatHistory.length > 0
+  ) {
+    const shouldContinue = window.confirm(
+      'Your goal changed. This will discard the previous clarification draft. Continue?',
+    );
+    if (!shouldContinue) {
+      return;
+    }
+
+    resetClarificationState({ contextKey });
+    await clearClarificationDraftStorage();
+  }
+
+  clarificationState.contextKey = contextKey;
+  clarificationState.roughGoal = roughGoal;
+  overviewMode = 'clarifying';
+  clarificationChatError = '';
+  renderOverviewTab(currentSession);
+
+  if (clarificationState.chatHistory.length > 0) {
+    await saveClarificationDraft();
+    return;
+  }
+
+  clarificationPending = true;
+  renderOverviewTab(currentSession);
+
+  try {
+    const response = await fetch(`${getClarifyBackendUrl()}/api/clarify-goal/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roughGoal }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    await handleClarificationResponse(data);
+  } catch (error) {
+    clarificationChatError = 'Could not reach the backend. Check your Backend URL setting and try again.';
+  } finally {
+    clarificationPending = false;
+    renderOverviewTab(currentSession);
+  }
+}
+
+async function handleRefineAgain() {
+  overviewMode = 'clarifying';
+  clarificationPending = true;
+  clarificationChatError = '';
+  renderOverviewTab(currentSession);
+
+  try {
+    const response = await fetch(`${getClarifyBackendUrl()}/api/clarify-goal/refine`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        roughGoal: clarificationState.roughGoal,
+        chatHistory: clarificationState.chatHistory,
+        answers: clarificationState.answers,
+        currentClarifiedGoal: clarificationState.clarifiedGoal,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    await handleClarificationResponse(data);
+  } catch (error) {
+    clarificationChatError = 'Failed to refine. Type an additional answer below to guide the refinement.';
+  } finally {
+    clarificationPending = false;
+    renderOverviewTab(currentSession);
+  }
+}
+
+async function handleConfirmClarifiedGoal() {
+  clarificationState.isGoalConfirmed = true;
+  await chrome.storage.local.set({
+    activeResearchGoal: clarificationState.clarifiedGoal,
+    originalResearchGoal: clarificationState.roughGoal,
+  });
+  await saveClarificationDraft();
+
+  const contextKey = getOverviewContextKey(currentSession);
+  const shouldMarkDirty = !isOverviewDraftMode(currentSession)
+    && clarificationState.clarifiedGoal !== String(currentSession?.goal || '').trim();
+
+  setGoalEditorState(contextKey, clarificationState.clarifiedGoal || '', shouldMarkDirty);
+  overviewMode = 'default';
+  renderOverviewTab(currentSession);
+}
+
+async function handleResetClarifiedGoal() {
+  const shouldReset = window.confirm(
+    'Reset to the original rough goal? This will discard your clarified goal.',
+  );
+  if (!shouldReset) {
+    return;
+  }
+
+  const nextValue = clarificationState.roughGoal;
+  const contextKey = getOverviewContextKey(currentSession);
+  const shouldMarkDirty = !isOverviewDraftMode(currentSession)
+    && nextValue !== String(currentSession?.goal || '').trim();
+
+  resetClarificationState({ contextKey });
+  await clearClarificationDraftStorage();
+  setGoalEditorState(contextKey, nextValue, shouldMarkDirty);
+  renderOverviewTab(currentSession);
 }
 
 function createSessionMenuRow(session, activeId) {
@@ -668,9 +1305,17 @@ function createSessionMenuRow(session, activeId) {
 
   button.addEventListener('click', async () => {
     setSessionMenuOpen(false);
-    if (!session?.id || session.id === activeId) return;
+    if (!session?.id) return;
+
+    if (session.id === activeId) {
+      if (newSessionComposerOpen) {
+        await setNewSessionComposerOpen(false);
+      }
+      return;
+    }
 
     try {
+      newSessionComposerOpen = false;
       await sendMessage('OPEN_SESSION', { sessionId: session.id });
       await refreshState(false);
     } catch (error) {
@@ -764,7 +1409,7 @@ function renderSessionSwitcher(allSessions, activeId) {
   createBtn.setAttribute('role', 'menuitem');
   createBtn.textContent = '+ New Session';
   createBtn.addEventListener('click', () => {
-    setNewSessionComposerOpen(true);
+    void setNewSessionComposerOpen(true);
   });
   sessionDropdownMenuEl.appendChild(createBtn);
 }
@@ -794,6 +1439,9 @@ function renderActiveTabContent(session, highlightNew = false) {
     case 'sources':
       renderSourcesTab(session);
       break;
+    case 'settings':
+      renderSettingsTab();
+      break;
     case 'overview':
     default:
       renderOverviewTab(session);
@@ -816,28 +1464,245 @@ function setActiveTab(tabId, { persist = true } = {}) {
   }
 }
 
+function createOverviewStatusRow(session) {
+  const row = document.createElement('div');
+  row.className = 'overview-status-row';
+
+  if (session?.id) {
+    row.appendChild(createStatusPill(getSessionStatusLabel(session), getSessionStatusClass(session)));
+  } else {
+    row.appendChild(createStatusPill('Not started', 'muted'));
+  }
+
+  if (backendHealth.checking) {
+    row.appendChild(createStatusPill('Checking backend', 'muted'));
+  } else if (backendHealth.healthy === false) {
+    row.appendChild(createStatusPill('Backend offline', 'danger'));
+  }
+
+  return row;
+}
+
+function createGoalStatusRow(session) {
+  const row = document.createElement('div');
+  row.className = 'goal-status-row';
+
+  if (clarificationState.contextKey === getOverviewContextKey(session)) {
+    if (clarificationState.isGoalConfirmed && clarificationState.clarifiedGoal) {
+      row.appendChild(createStatusPill('Clarified ✓', 'success'));
+
+      const resetBtn = document.createElement('button');
+      resetBtn.type = 'button';
+      resetBtn.className = 'text-btn small';
+      resetBtn.textContent = 'Reset';
+      resetBtn.addEventListener('click', () => {
+        void handleResetClarifiedGoal();
+      });
+      row.appendChild(resetBtn);
+    } else if (clarificationState.chatHistory.length > 0) {
+      row.appendChild(createStatusPill('Clarifying…', 'warning'));
+    }
+  }
+
+  return row;
+}
+
+function createClarificationCard() {
+  const card = document.createElement('article');
+  card.className = 'card clarification-card';
+
+  const header = document.createElement('div');
+  header.className = 'section-header-row';
+
+  const title = document.createElement('span');
+  title.className = 'section-title';
+  title.textContent = 'Clarify your goal';
+  header.appendChild(title);
+
+  const progress = document.createElement('span');
+  progress.className = 'muted small';
+  progress.textContent = getClarifyProgressLabel();
+  header.appendChild(progress);
+
+  card.appendChild(header);
+
+  const chatContainer = document.createElement('div');
+  chatContainer.className = 'chat-container';
+
+  for (const message of clarificationState.chatHistory) {
+    const item = document.createElement('div');
+    item.className = `chat-message ${message.role === 'assistant' ? 'msg-assistant' : 'msg-user'}`;
+    item.textContent = message.text;
+    chatContainer.appendChild(item);
+  }
+
+  if (clarificationPending) {
+    const typing = document.createElement('div');
+    typing.className = 'chat-message msg-assistant typing-indicator';
+    typing.innerHTML = '<span></span><span></span><span></span>';
+    chatContainer.appendChild(typing);
+  }
+
+  if (clarificationChatError) {
+    const error = document.createElement('div');
+    error.className = 'chat-error';
+    error.textContent = clarificationChatError;
+    chatContainer.appendChild(error);
+  }
+
+  card.appendChild(chatContainer);
+
+  const lastMessage = clarificationState.chatHistory[clarificationState.chatHistory.length - 1];
+  const options = lastMessage?.role === 'assistant' && Array.isArray(lastMessage.options)
+    ? lastMessage.options
+    : [];
+
+  const optionsContainer = document.createElement('div');
+  optionsContainer.className = 'options-container';
+  for (const option of options) {
+    const optionBtn = document.createElement('button');
+    optionBtn.type = 'button';
+    optionBtn.className = 'option-chip';
+    optionBtn.textContent = option;
+    optionBtn.disabled = clarificationPending;
+    optionBtn.addEventListener('click', () => {
+      void handleClarificationAnswer(option);
+    });
+    optionsContainer.appendChild(optionBtn);
+  }
+  card.appendChild(optionsContainer);
+
+  const inputRow = document.createElement('div');
+  inputRow.className = 'chat-input-row';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'Or type a custom answer…';
+  input.value = clarificationAnswerDraft;
+  input.disabled = clarificationPending;
+  input.addEventListener('input', (event) => {
+    clarificationAnswerDraft = event.target.value;
+    sendBtn.disabled = clarificationPending || !clarificationAnswerDraft.trim();
+  });
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      void handleClarificationAnswer(clarificationAnswerDraft);
+    }
+  });
+  inputRow.appendChild(input);
+
+  const sendBtn = document.createElement('button');
+  sendBtn.type = 'button';
+  sendBtn.className = 'send-btn';
+  sendBtn.textContent = 'Send';
+  sendBtn.disabled = clarificationPending || !clarificationAnswerDraft.trim();
+  sendBtn.addEventListener('click', () => {
+    void handleClarificationAnswer(clarificationAnswerDraft);
+  });
+  inputRow.appendChild(sendBtn);
+
+  card.appendChild(inputRow);
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'secondary full-width-btn';
+  cancelBtn.textContent = 'Close';
+  cancelBtn.disabled = clarificationPending;
+  cancelBtn.addEventListener('click', () => {
+    setOverviewMode('default');
+  });
+  card.appendChild(cancelBtn);
+
+  return card;
+}
+
+function createClarificationConfirmationCard() {
+  const card = document.createElement('article');
+  card.className = 'card clarification-card';
+
+  const title = document.createElement('div');
+  title.className = 'section-title';
+  title.textContent = 'Goal clarified';
+  card.appendChild(title);
+
+  const comparison = document.createElement('div');
+  comparison.className = 'goal-comparison';
+
+  const originalField = document.createElement('div');
+  originalField.className = 'goal-field';
+  const originalLabel = document.createElement('div');
+  originalLabel.className = 'goal-field-label muted';
+  originalLabel.textContent = 'Original';
+  const originalText = document.createElement('div');
+  originalText.className = 'goal-field-text muted';
+  originalText.textContent = clarificationState.roughGoal || 'No original goal saved.';
+  originalField.appendChild(originalLabel);
+  originalField.appendChild(originalText);
+  comparison.appendChild(originalField);
+
+  const clarifiedField = document.createElement('div');
+  clarifiedField.className = 'goal-field';
+  const clarifiedLabel = document.createElement('div');
+  clarifiedLabel.className = 'goal-field-label';
+  clarifiedLabel.textContent = 'Clarified';
+  const clarifiedText = document.createElement('div');
+  clarifiedText.className = 'goal-field-text clarified-text';
+  clarifiedText.textContent = clarificationState.clarifiedGoal || 'No clarified goal returned.';
+  clarifiedField.appendChild(clarifiedLabel);
+  clarifiedField.appendChild(clarifiedText);
+  comparison.appendChild(clarifiedField);
+
+  if (clarificationState.rationale) {
+    const rationale = document.createElement('div');
+    rationale.className = 'rationale-text muted';
+    rationale.textContent = clarificationState.rationale;
+    comparison.appendChild(rationale);
+  }
+
+  card.appendChild(comparison);
+
+  const actions = document.createElement('div');
+  actions.className = 'session-actions';
+
+  const confirmBtn = document.createElement('button');
+  confirmBtn.type = 'button';
+  confirmBtn.textContent = 'Use This Goal';
+  confirmBtn.addEventListener('click', () => {
+    void handleConfirmClarifiedGoal();
+  });
+  actions.appendChild(confirmBtn);
+
+  const refineBtn = document.createElement('button');
+  refineBtn.type = 'button';
+  refineBtn.className = 'secondary';
+  refineBtn.textContent = 'Refine Again';
+  refineBtn.addEventListener('click', () => {
+    void handleRefineAgain();
+  });
+  actions.appendChild(refineBtn);
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'secondary';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', () => {
+    setOverviewMode('default');
+  });
+  actions.appendChild(cancelBtn);
+
+  card.appendChild(actions);
+  return card;
+}
+
 function renderOverviewTab(session) {
   overviewTabContentEl.innerHTML = '';
 
   const stack = document.createElement('div');
   stack.className = 'panel-stack';
 
-  if (!session?.id) {
-    stack.appendChild(
-      createEmptyStateCard(
-        'No research session is selected. Use the session menu to start one or reopen a past workspace.',
-        {
-          actionLabel: 'New session',
-          onAction: () => setNewSessionComposerOpen(true),
-        },
-      ),
-    );
-    overviewTabContentEl.appendChild(stack);
-    return;
-  }
-
+  const draftMode = isOverviewDraftMode(session);
   const card = document.createElement('article');
-  card.className = 'card overview-card';
+  card.className = `card overview-card ${draftMode ? 'overview-entry-card' : ''}`.trim();
 
   const header = document.createElement('div');
   header.className = 'overview-header';
@@ -846,71 +1711,340 @@ function renderOverviewTab(session) {
   titleBlock.className = 'overview-title-block';
 
   const title = document.createElement('h2');
-  title.textContent = getSessionDisplayTitle(session);
+  title.textContent = draftMode
+    ? session?.id
+      ? 'Start a new research session'
+      : 'Start your first research session'
+    : getSessionDisplayTitle(session);
   titleBlock.appendChild(title);
 
-  const updated = document.createElement('div');
-  updated.className = 'muted small';
-  updated.textContent = formatSessionTimestamp(session.updatedAt, 'Last updated')
-    || formatSessionTimestamp(session.createdAt, 'Created');
-  titleBlock.appendChild(updated);
+  const subtitle = document.createElement('div');
+  subtitle.className = 'muted small';
+  subtitle.textContent = draftMode
+    ? session?.id
+      ? 'The current session stays active until you start this new one.'
+      : 'Set a goal, clarify it, and launch your workspace here.'
+    : formatSessionTimestamp(session.updatedAt, 'Last updated')
+      || formatSessionTimestamp(session.createdAt, 'Created');
+  titleBlock.appendChild(subtitle);
 
   header.appendChild(titleBlock);
-  header.appendChild(createStatusPill(getSessionStatusLabel(session), getSessionStatusClass(session)));
+  header.appendChild(createOverviewStatusRow(draftMode ? null : session));
   card.appendChild(header);
 
   const goalBlock = document.createElement('div');
   goalBlock.className = 'overview-goal-block';
 
+  const goalLabelRow = document.createElement('div');
+  goalLabelRow.className = 'label-row';
+
   const goalLabel = document.createElement('div');
   goalLabel.className = 'overview-section-label';
-  goalLabel.textContent = 'Goal';
-  goalBlock.appendChild(goalLabel);
+  goalLabel.textContent = 'Research goal';
+  goalLabelRow.appendChild(goalLabel);
+  goalBlock.appendChild(goalLabelRow);
 
-  const goalText = document.createElement('p');
-  goalText.className = 'overview-goal';
-  goalText.textContent = session.goal || 'No goal saved yet.';
-  goalBlock.appendChild(goalText);
+  const goalStatusRow = createGoalStatusRow(session);
+  if (goalStatusRow.childNodes.length > 0) {
+    goalBlock.appendChild(goalStatusRow);
+  }
+
+  const goalInput = document.createElement('textarea');
+  goalInput.id = 'overviewGoalInput';
+  goalInput.rows = draftMode ? 4 : 5;
+  goalInput.value = goalEditorState.value;
+  goalInput.placeholder = 'Example: Understand poverty in Japan';
+  goalInput.disabled = clarificationPending || overviewActionPending;
+  goalInput.addEventListener('input', (event) => {
+    handleOverviewGoalInput(event.target.value);
+  });
+  goalBlock.appendChild(goalInput);
+
+  if (overviewError) {
+    const error = document.createElement('div');
+    error.className = 'inline-error';
+    error.textContent = overviewError;
+    goalBlock.appendChild(error);
+  }
+
+  if (!draftMode && goalEditorState.dirty) {
+    const note = document.createElement('div');
+    note.id = 'overviewGoalHint';
+    note.className = 'muted small';
+    note.textContent = 'Saving the goal updates the session title and future analysis, but it does not regenerate existing research questions.';
+    goalBlock.appendChild(note);
+  } else if (!draftMode) {
+    const note = document.createElement('div');
+    note.id = 'overviewGoalHint';
+    note.className = 'muted small hidden';
+    note.textContent = 'Saving the goal updates the session title and future analysis, but it does not regenerate existing research questions.';
+    goalBlock.appendChild(note);
+  }
 
   card.appendChild(goalBlock);
-  card.appendChild(createSessionStats(session, 'session-stats overview-stats'));
+
+  if (!draftMode && session?.id) {
+    card.appendChild(createSessionStats(session, 'session-stats overview-stats'));
+  }
 
   const actions = document.createElement('div');
   actions.className = 'session-actions overview-actions';
 
-  const primaryBtn = document.createElement('button');
-  primaryBtn.type = 'button';
-  primaryBtn.textContent = session.status === 'active' ? 'Pause session' : 'Resume session';
-  if (session.status === 'active') {
-    primaryBtn.className = 'secondary';
-  }
-  primaryBtn.addEventListener('click', async () => {
-    try {
-      await handleCurrentSessionAction(session);
-      await refreshState(false);
-    } catch (error) {
-      window.alert(error.message || 'Failed to update session');
-    }
-  });
-  actions.appendChild(primaryBtn);
+  if (draftMode) {
+    const startBtn = document.createElement('button');
+    startBtn.type = 'button';
+    startBtn.textContent = overviewActionPending ? 'Starting…' : 'Start session';
+    startBtn.disabled = overviewActionPending || clarificationPending;
+    startBtn.addEventListener('click', () => {
+      void handleStartNewSession();
+    });
+    actions.appendChild(startBtn);
 
-  const deleteBtn = document.createElement('button');
-  deleteBtn.type = 'button';
-  deleteBtn.className = 'danger';
-  deleteBtn.textContent = 'Delete';
-  deleteBtn.addEventListener('click', async () => {
-    try {
-      await handleDeleteSession(session.id);
-      await refreshState(false);
-    } catch (error) {
-      window.alert(error.message || 'Failed to delete session');
+    const clarifyBtn = document.createElement('button');
+    clarifyBtn.type = 'button';
+    clarifyBtn.className = 'secondary';
+    clarifyBtn.textContent = isClarificationRelevantForCurrentContext() && clarificationState.isGoalConfirmed
+      ? 'Re-clarify goal'
+      : 'Clarify Goal';
+    clarifyBtn.disabled = overviewActionPending || clarificationPending;
+    clarifyBtn.addEventListener('click', () => {
+      void handleClarifyGoalClick();
+    });
+    actions.appendChild(clarifyBtn);
+
+    if (session?.id) {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'secondary';
+      cancelBtn.textContent = 'Back to current session';
+      cancelBtn.disabled = overviewActionPending || clarificationPending;
+      cancelBtn.addEventListener('click', () => {
+        void setNewSessionComposerOpen(false);
+      });
+      actions.appendChild(cancelBtn);
     }
-  });
-  actions.appendChild(deleteBtn);
+  } else {
+    const primaryBtn = document.createElement('button');
+    primaryBtn.type = 'button';
+    primaryBtn.textContent = session.status === 'active' ? 'Pause session' : 'Resume session';
+    primaryBtn.className = session.status === 'active' ? 'secondary' : '';
+    primaryBtn.disabled = overviewActionPending || clarificationPending;
+    primaryBtn.addEventListener('click', async () => {
+      if (goalEditorState.dirty) {
+        window.alert('Save the edited goal before changing the session state.');
+        return;
+      }
+
+      try {
+        await handleCurrentSessionAction(session);
+        await refreshState(false);
+      } catch (error) {
+        window.alert(error.message || 'Failed to update session');
+      }
+    });
+    actions.appendChild(primaryBtn);
+
+    const clarifyBtn = document.createElement('button');
+    clarifyBtn.type = 'button';
+    clarifyBtn.className = 'secondary';
+    clarifyBtn.textContent = isClarificationRelevantForCurrentContext() && clarificationState.isGoalConfirmed
+      ? 'Re-clarify goal'
+      : 'Clarify Goal';
+    clarifyBtn.disabled = overviewActionPending || clarificationPending;
+    clarifyBtn.addEventListener('click', () => {
+      void handleClarifyGoalClick();
+    });
+    actions.appendChild(clarifyBtn);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.id = 'overviewSaveGoalBtn';
+    saveBtn.type = 'button';
+    saveBtn.textContent = overviewActionPending ? 'Saving…' : 'Save goal';
+    saveBtn.disabled = !goalEditorState.dirty || overviewActionPending || clarificationPending;
+    saveBtn.addEventListener('click', () => {
+      void handleSaveSessionGoal(session);
+    });
+    actions.appendChild(saveBtn);
+  }
 
   card.appendChild(actions);
+
+  if (!draftMode && session?.id) {
+    const dangerRow = document.createElement('div');
+    dangerRow.className = 'overview-danger-row';
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'danger';
+    deleteBtn.textContent = 'Delete session';
+    deleteBtn.disabled = overviewActionPending || clarificationPending;
+    deleteBtn.addEventListener('click', async () => {
+      try {
+        await handleDeleteSession(session.id);
+        await refreshState(false);
+      } catch (error) {
+        window.alert(error.message || 'Failed to delete session');
+      }
+    });
+    dangerRow.appendChild(deleteBtn);
+    card.appendChild(dangerRow);
+  }
+
   stack.appendChild(card);
+
+  if (overviewMode === 'clarifying') {
+    stack.appendChild(createClarificationCard());
+  } else if (overviewMode === 'confirm') {
+    stack.appendChild(createClarificationConfirmationCard());
+  }
+
   overviewTabContentEl.appendChild(stack);
+}
+
+function renderSettingsTab() {
+  settingsTabContentEl.innerHTML = '';
+
+  const stack = document.createElement('div');
+  stack.className = 'panel-stack';
+
+  const card = document.createElement('article');
+  card.className = 'card settings-card';
+
+  const header = document.createElement('div');
+  header.className = 'overview-header';
+
+  const titleBlock = document.createElement('div');
+  titleBlock.className = 'overview-title-block';
+
+  const title = document.createElement('h2');
+  title.textContent = 'Settings';
+  titleBlock.appendChild(title);
+
+  const subtitle = document.createElement('div');
+  subtitle.className = 'muted small';
+  subtitle.textContent = 'Control backend connectivity and panel behavior for research sessions.';
+  titleBlock.appendChild(subtitle);
+
+  header.appendChild(titleBlock);
+
+  const statusBadge = createStatusPill(
+    backendHealth.checking
+      ? 'Checking backend'
+      : backendHealth.healthy == null
+        ? 'Backend status'
+        : backendHealth.healthy
+        ? 'Backend online'
+        : 'Backend offline',
+    backendHealth.checking
+      ? 'muted'
+      : backendHealth.healthy == null
+        ? 'muted'
+        : backendHealth.healthy
+        ? 'success'
+        : 'danger',
+  );
+  header.appendChild(statusBadge);
+  card.appendChild(header);
+
+  const form = document.createElement('div');
+  form.className = 'settings-form';
+
+  const backendLabel = document.createElement('label');
+  backendLabel.textContent = 'Backend URL';
+  form.appendChild(backendLabel);
+
+  const backendInput = document.createElement('input');
+  backendInput.type = 'text';
+  backendInput.value = settingsDraft.backendUrl;
+  backendInput.placeholder = 'http://localhost:8000';
+  backendInput.addEventListener('input', (event) => {
+    handleSettingsFieldChange('backendUrl', event.target.value);
+  });
+  form.appendChild(backendInput);
+
+  const statusText = document.createElement('div');
+  statusText.className = 'muted small';
+  statusText.textContent = backendHealth.healthy
+    ? 'AI analysis is available.'
+    : backendHealth.error
+      ? `Cannot reach backend. ${backendHealth.error}`.trim()
+      : 'Save settings to verify the current backend URL.';
+  form.appendChild(statusText);
+
+  const fontLabel = document.createElement('label');
+  fontLabel.className = 'section-label';
+  fontLabel.textContent = 'Font size';
+  form.appendChild(fontLabel);
+
+  const fontRow = document.createElement('div');
+  fontRow.className = 'row gap-sm settings-range-row';
+
+  const fontInput = document.createElement('input');
+  fontInput.type = 'range';
+  fontInput.min = '12';
+  fontInput.max = '20';
+  fontInput.step = '1';
+  fontInput.value = String(settingsDraft.uiFontSize);
+  fontInput.addEventListener('input', (event) => {
+    handleSettingsFieldChange('uiFontSize', normalizeFontSize(event.target.value));
+  });
+  fontRow.appendChild(fontInput);
+
+  const fontValue = document.createElement('span');
+  fontValue.id = 'settingsFontValue';
+  fontValue.className = 'small muted';
+  fontValue.textContent = `${settingsDraft.uiFontSize}px`;
+  fontRow.appendChild(fontValue);
+
+  form.appendChild(fontRow);
+
+  const checkboxLabel = document.createElement('label');
+  checkboxLabel.className = 'checkbox-row';
+
+  const autoAnalyzeCheckbox = document.createElement('input');
+  autoAnalyzeCheckbox.type = 'checkbox';
+  autoAnalyzeCheckbox.checked = Boolean(settingsDraft.autoAnalyze);
+  autoAnalyzeCheckbox.addEventListener('change', (event) => {
+    handleSettingsFieldChange('autoAnalyze', event.target.checked);
+  });
+  checkboxLabel.appendChild(autoAnalyzeCheckbox);
+  checkboxLabel.appendChild(document.createTextNode('Auto-analyze pages during research sessions'));
+  form.appendChild(checkboxLabel);
+
+  const dirtyNote = document.createElement('div');
+  dirtyNote.id = 'settingsDirtyNote';
+  dirtyNote.className = `muted small ${settingsDraftDirty ? '' : 'hidden'}`.trim();
+  dirtyNote.textContent = 'Save settings to apply the updated backend URL and defaults.';
+  form.appendChild(dirtyNote);
+
+  const actions = document.createElement('div');
+  actions.className = 'session-actions overview-actions';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.id = 'settingsSaveBtn';
+  saveBtn.type = 'button';
+  saveBtn.textContent = settingsDraftDirty ? 'Save settings' : 'Saved';
+  saveBtn.disabled = !settingsDraftDirty && !backendHealth.error;
+  saveBtn.addEventListener('click', () => {
+    void handleSaveSettings();
+  });
+  actions.appendChild(saveBtn);
+
+  const refreshBtn = document.createElement('button');
+  refreshBtn.id = 'settingsRefreshBtn';
+  refreshBtn.type = 'button';
+  refreshBtn.className = 'secondary';
+  refreshBtn.textContent = 'Check connection';
+  refreshBtn.disabled = backendHealth.checking || settingsDraftDirty;
+  refreshBtn.addEventListener('click', () => {
+    void refreshBackendHealth();
+  });
+  actions.appendChild(refreshBtn);
+
+  form.appendChild(actions);
+  card.appendChild(form);
+  stack.appendChild(card);
+  settingsTabContentEl.appendChild(stack);
 }
 
 function syncInsightsToolbar(hasInsights) {
@@ -1284,7 +2418,9 @@ function renderQuestionsTab(session) {
         'Questions and missing topics will appear here once you start or reopen a research session.',
         {
           actionLabel: 'New session',
-          onAction: () => setNewSessionComposerOpen(true),
+          onAction: () => {
+            void setNewSessionComposerOpen(true);
+          },
         },
       ),
     );
@@ -1343,7 +2479,9 @@ function renderSourcesTab(session) {
         'Sources will appear here once you start or reopen a research session.',
         {
           actionLabel: 'New session',
-          onAction: () => setNewSessionComposerOpen(true),
+          onAction: () => {
+            void setNewSessionComposerOpen(true);
+          },
         },
       ),
     );
@@ -1370,19 +2508,42 @@ function renderSourcesTab(session) {
 }
 
 function renderSession(session, highlightNew = true) {
+  const previousSessionId = currentSession?.id || null;
+  const shouldHoldOverview = selectedTab === 'overview'
+    && goalEditorState.dirty
+    && previousSessionId
+    && session?.id
+    && previousSessionId === session.id;
+  const shouldHoldSettings = selectedTab === 'settings' && settingsDraftDirty;
+
   currentSession = session || null;
-  setTextContent(
-    updatedAtEl,
-    session?.updatedAt
-      ? formatSessionTimestamp(session.updatedAt, 'Last updated')
-      : '',
-  );
 
   renderTabBar();
-  renderOverviewTab(session);
+  if (!shouldHoldOverview) {
+    renderOverviewTab(session);
+  }
   renderInsightsTab(session, highlightNew);
   renderQuestionsTab(session);
   renderSourcesTab(session);
+  if (!shouldHoldSettings) {
+    renderSettingsTab();
+  }
+}
+
+async function syncSidebarState(state) {
+  const normalizedSettings = normalizeSettings(state?.settings);
+  currentSettings = normalizedSettings;
+
+  if (!settingsDraftDirty || settingsAreEqual(settingsDraft, normalizedSettings)) {
+    settingsDraft = { ...normalizedSettings };
+    settingsDraftDirty = false;
+  }
+
+  if (!state?.session?.id) {
+    newSessionComposerOpen = true;
+  }
+
+  await queueContextSync(state?.session || null);
 }
 
 function applySessionState(state, highlightNew = true) {
@@ -1406,13 +2567,15 @@ function applySessionState(state, highlightNew = true) {
     }
   }
 
+  allSessions = Array.isArray(state?.allSessions) ? state.allSessions.filter(Boolean) : [];
   currentSessionId = nextCurrentSessionId;
-  renderSessionSwitcher(state?.allSessions, nextCurrentSessionId);
+  renderSessionSwitcher(allSessions, nextCurrentSessionId);
   renderSession(nextSession, highlightNew && isSameSession);
 }
 
 async function refreshState(highlightNew = true) {
   const state = await getBestAvailableState();
+  await syncSidebarState(state);
   applySessionState(state, highlightNew);
 }
 
@@ -1442,17 +2605,6 @@ sessionSwitcherBtn.addEventListener('click', (event) => {
   setSessionMenuOpen(!sessionMenuOpen);
 });
 
-startNewSessionBtn.addEventListener('click', handleStartNewSession);
-cancelNewSessionBtn.addEventListener('click', () => {
-  setNewSessionComposerOpen(false);
-});
-
-newSessionGoalInputEl.addEventListener('keydown', (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-    handleStartNewSession();
-  }
-});
-
 document.addEventListener('click', (event) => {
   if (!sessionMenuOpen) return;
   if (sessionSwitcherSectionEl?.contains(event.target)) return;
@@ -1464,8 +2616,8 @@ document.addEventListener('keydown', (event) => {
   if (sessionMenuOpen) {
     setSessionMenuOpen(false);
   }
-  if (!newSessionComposerEl.classList.contains('hidden')) {
-    setNewSessionComposerOpen(false);
+  if (newSessionComposerOpen && currentSession?.id) {
+    void setNewSessionComposerOpen(false);
   }
 });
 
@@ -1486,12 +2638,23 @@ timelineInsightsBtn.addEventListener('click', () => {
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'SESSION_UPDATED') {
-    applySessionState(message.payload, true);
+    void (async () => {
+      await syncSidebarState(message.payload);
+      applySessionState(message.payload, true);
+    })();
     return;
   }
 
   if (message.type === 'SETTINGS_UPDATED') {
-    applyFontSize(normalizeFontSize(message.payload?.uiFontSize));
+    const nextSettings = normalizeSettings(message.payload);
+    currentSettings = nextSettings;
+    if (!settingsDraftDirty || settingsAreEqual(settingsDraft, nextSettings)) {
+      settingsDraft = { ...nextSettings };
+      settingsDraftDirty = false;
+    }
+    applyFontSize(nextSettings.uiFontSize);
+    renderOverviewTab(currentSession);
+    renderSettingsTab();
   }
 });
 
@@ -1520,7 +2683,9 @@ async function initializeSidebar() {
   const { session, settings } = state;
   applyFontSize(normalizeFontSize(settings?.uiFontSize));
   previousInsightKeys = new Set((session?.insights || []).map(insightKey));
+  await syncSidebarState(state);
   applySessionState(state, false);
+  void refreshBackendHealth();
 
   if (session?.insights?.length) {
     requestAnimationFrame(() => {

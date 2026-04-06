@@ -43,19 +43,23 @@ chrome.runtime.onInstalled.addListener(async () => {
   await ensureSessionStoreInitialized();
   await ensureDriftStateInitialized();
   await ensureDriftAlarm();
+  await configureSidePanelAction();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   await ensureSessionStoreInitialized();
   await ensureDriftStateInitialized();
   await ensureDriftAlarm();
+  await configureSidePanelAction();
 });
 
-chrome.action.onClicked.addListener(async (tab) => {
-  if (tab?.windowId) {
-    await chrome.sidePanel.open({ windowId: tab.windowId });
-  }
-});
+if (!chrome.sidePanel?.setPanelBehavior) {
+  chrome.action.onClicked.addListener(async (tab) => {
+    if (tab?.windowId) {
+      await chrome.sidePanel.open({ windowId: tab.windowId });
+    }
+  });
+}
 
 chrome.tabs.onActivated.addListener(async () => {
   await syncActiveTabState('tabs.onActivated');
@@ -143,6 +147,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true, data: settings });
         break;
       }
+      case 'UPDATE_SESSION_GOAL': {
+        const updated = await updateSessionGoal(
+          message.payload?.sessionId,
+          message.payload?.goal,
+        );
+        sendResponse({ ok: true, data: updated });
+        break;
+      }
       case 'PING_BACKEND': {
         const healthy = await pingBackend();
         sendResponse({ ok: true, data: healthy });
@@ -173,6 +185,18 @@ async function ensureDriftAlarm() {
   const alarm = await chrome.alarms.get(DRIFT_ALARM_NAME);
   if (!alarm) {
     chrome.alarms.create(DRIFT_ALARM_NAME, { periodInMinutes: 1 });
+  }
+}
+
+async function configureSidePanelAction() {
+  if (!chrome.sidePanel?.setPanelBehavior) {
+    return;
+  }
+
+  try {
+    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  } catch (error) {
+    console.warn('Failed to enable sidepanel action behavior', error);
   }
 }
 
@@ -470,6 +494,32 @@ async function toggleSessionPause(paused) {
     await resetDriftForSessionEnd();
   } else {
     await syncDriftToCurrentSession('resume-session', { resetTracking: true });
+  }
+
+  return updated;
+}
+
+async function updateSessionGoal(sessionId, goal) {
+  const nextGoal = String(goal || '').trim();
+  if (!nextGoal) {
+    throw new Error('Research goal cannot be empty');
+  }
+
+  const targetId = sessionId || await getCurrentSessionId();
+  const session = targetId ? await getSession(targetId) : await getCurrentSession();
+  if (!session?.id) {
+    throw new Error('Research session not found');
+  }
+
+  const updated = await commitSessionUpdate({
+    ...session,
+    goal: nextGoal,
+    title: nextGoal,
+  });
+
+  const currentId = await getCurrentSessionId();
+  if (updated.id === currentId && isSessionActive(updated)) {
+    await syncDriftToCurrentSession('update-session-goal');
   }
 
   return updated;
