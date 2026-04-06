@@ -35,22 +35,6 @@
               aria-label="Research sessions"
             ></div>
           </div>
-
-          <div id="newSessionComposer" class="card new-session-composer hidden">
-            <div class="label-row">
-              <strong>New session</strong>
-              <button type="button" id="cancelNewSessionBtn" class="text-btn">Cancel</button>
-            </div>
-            <textarea
-              id="newSessionGoalInput"
-              rows="3"
-              placeholder="Example: Understand poverty in Japan"
-            ></textarea>
-            <div id="newSessionError" class="inline-error hidden"></div>
-            <div class="session-actions">
-              <button type="button" id="startNewSessionBtn">Start session</button>
-            </div>
-          </div>
         </section>
 
         <nav id="tabBar" class="tab-bar" role="tablist" aria-label="Session content">
@@ -97,6 +81,17 @@
             aria-selected="false"
           >
             Sources
+          </button>
+          <button
+            type="button"
+            id="tab-settings"
+            class="tab-btn"
+            data-tab="settings"
+            role="tab"
+            aria-controls="settingsTabPanel"
+            aria-selected="false"
+          >
+            Settings
           </button>
         </nav>
       </div>
@@ -160,6 +155,16 @@
           hidden
         >
           <div id="sourcesTabContent"></div>
+        </section>
+
+        <section
+          id="settingsTabPanel"
+          class="tab-panel hidden"
+          role="tabpanel"
+          aria-labelledby="tab-settings"
+          hidden
+        >
+          <div id="settingsTabContent"></div>
         </section>
       </main>
     </div>

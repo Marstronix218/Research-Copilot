@@ -21,7 +21,6 @@
     "type": "module"
   },
   "action": {
-    "default_popup": "popup.html",
     "default_title": "Research Copilot",
     "default_icon": {
       "16": "icons/icon.png",

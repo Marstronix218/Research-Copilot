@@ -6,88 +6,13 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body class="popup-body">
-    <div class="container">
+    <div class="container popup-launcher">
       <h1>Research Copilot</h1>
-      <p class="muted">Start and manage your current research session.</p>
+      <p class="muted">The sidepanel is the main workspace for sessions, insights, and settings.</p>
 
-      <!-- ── Section 1: Goal input (default state) ──────────────────────── -->
-      <div id="goal-input-section">
-        <label for="goal">Research goal</label>
-        <textarea id="goal" rows="3" placeholder="Example: Understand poverty in Japan"></textarea>
-        <div id="goalStatusBadgeRow" class="goal-status-row hidden">
-          <span id="goalStatusBadge" class="badge"></span>
-          <button id="resetGoalBtn" class="text-btn small">Reset</button>
-        </div>
-        <div id="goal-error" class="inline-error hidden"></div>
-        <div class="row gap-sm button-row">
-          <button id="startBtn">Start session</button>
-          <button id="clarifyBtn" class="secondary">Clarify Goal</button>
-          <button id="openPanelBtn" class="secondary">Open panel</button>
-        </div>
-      </div>
-
-      <!-- ── Section 2: Clarification chat ──────────────────────────────── -->
-      <div id="clarification-section" class="hidden">
-        <div class="section-header-row">
-          <span class="section-title">Clarify your goal</span>
-          <span id="clarifyProgress" class="muted small"></span>
-        </div>
-        <div id="chatContainer" class="chat-container"></div>
-        <div id="optionsContainer" class="options-container"></div>
-        <div class="chat-input-row">
-          <input id="customAnswerInput" type="text" placeholder="Or type a custom answer…" />
-          <button id="sendAnswerBtn" class="send-btn">Send</button>
-        </div>
-        <button id="cancelClarifyBtn" class="secondary full-width-btn">Cancel</button>
-      </div>
-
-      <!-- ── Section 3: Goal confirmation ───────────────────────────────── -->
-      <div id="goal-confirmation-section" class="hidden">
-        <div class="section-title">Goal clarified</div>
-        <div class="goal-comparison">
-          <div class="goal-field">
-            <div class="goal-field-label muted">Original</div>
-            <div id="origGoalText" class="goal-field-text muted"></div>
-          </div>
-          <div class="goal-field">
-            <div class="goal-field-label">Clarified</div>
-            <div id="clarifiedGoalText" class="goal-field-text clarified-text"></div>
-          </div>
-          <div id="rationaleText" class="rationale-text muted hidden"></div>
-        </div>
-        <div class="row gap-sm button-row">
-          <button id="confirmGoalBtn">Use This Goal</button>
-          <button id="refineAgainBtn" class="secondary">Refine Again</button>
-          <button id="cancelConfirmBtn" class="secondary">Cancel</button>
-        </div>
-      </div>
-
-      <!-- ── Main bottom sections (hidden during clarification flows) ────── -->
-      <div id="main-bottom-sections">
-        <div class="section">
-          <div class="label-row">
-            <span>Status</span>
-            <span id="healthBadge" class="badge">Checking backend…</span>
-          </div>
-          <div id="statusText" class="muted"></div>
-        </div>
-
-        <div class="section">
-          <label for="backendUrl">Backend URL</label>
-          <input id="backendUrl" type="text" placeholder="http://localhost:8000" />
-          <label for="fontSize" class="section-label">Font size</label>
-          <div class="row gap-sm">
-            <input id="fontSize" type="range" min="12" max="20" step="1" />
-            <span id="fontSizeValue" class="small muted"></span>
-          </div>
-          <label class="checkbox-row">
-            <input id="autoAnalyze" type="checkbox" />
-            Auto-analyze pages during research sessions
-          </label>
-          <button id="saveSettingsBtn" class="secondary">Save settings</button>
-        </div>
-
-        <div id="sessionInfo" class="section"></div>
+      <div class="card popup-launcher-card">
+        <div id="popupStatusLine" class="muted">Loading current session…</div>
+        <button id="openPanelBtn" type="button">Open Research Copilot</button>
       </div>
     </div>
     <script src="popup.js"></script>
