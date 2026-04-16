@@ -6,12 +6,21 @@ function extractMainText() {
 }
 
 function buildPayload() {
+  const extractedAt = new Date().toISOString();
+  const selection = window.getSelection()?.toString() || '';
+
   return {
+    sourceType: 'html',
     url: window.location.href,
     title: document.title,
     content: extractMainText(),
-    selection: window.getSelection()?.toString() || '',
-    timestamp: new Date().toISOString(),
+    selection,
+    timestamp: extractedAt,
+    metadata: {
+      extractedAt,
+      extractionMethod: 'content-script-innerText',
+      selection: selection || undefined,
+    },
   };
 }
 

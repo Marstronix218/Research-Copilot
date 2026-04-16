@@ -53,12 +53,14 @@ let sidebarUiState = { sessions: {} };
 let persistUiStatePromise = Promise.resolve();
 let sessionMenuOpen = false;
 let scheduledRefreshHandle = null;
+let captureStatusTimeout = null;
 
 const sessionSwitcherSectionEl = document.querySelector('.session-switcher-section');
 const sessionSwitcherBtn = document.getElementById('sessionSwitcherBtn');
 const sessionSwitcherLabelEl = document.getElementById('sessionSwitcherLabel');
 const sessionSwitcherMetaEl = document.getElementById('sessionSwitcherMeta');
 const sessionDropdownMenuEl = document.getElementById('sessionDropdownMenu');
+const captureStatusBannerEl = document.getElementById('captureStatusBanner');
 const overviewTabContentEl = document.getElementById('overviewTabContent');
 const questionsTabContentEl = document.getElementById('questionsTabContent');
 const sourcesTabContentEl = document.getElementById('sourcesTabContent');
@@ -189,6 +191,50 @@ function applyFontSize(sizePx) {
 function setTextContent(element, value) {
   if (!element) return;
   element.textContent = value;
+}
+
+function hideCaptureStatus() {
+  if (captureStatusTimeout) {
+    clearTimeout(captureStatusTimeout);
+    captureStatusTimeout = null;
+  }
+
+  if (!captureStatusBannerEl) return;
+  captureStatusBannerEl.textContent = '';
+  captureStatusBannerEl.className = 'capture-status-banner hidden';
+}
+
+function showCaptureStatus(payload = {}) {
+  if (!captureStatusBannerEl) return;
+
+  const state = payload?.state || 'info';
+  if (state === 'idle' || !payload?.message) {
+    hideCaptureStatus();
+    return;
+  }
+
+  if (captureStatusTimeout) {
+    clearTimeout(captureStatusTimeout);
+    captureStatusTimeout = null;
+  }
+
+  captureStatusBannerEl.textContent = payload.message;
+  captureStatusBannerEl.className = 'capture-status-banner';
+
+  if (state === 'error') {
+    captureStatusBannerEl.classList.add('error');
+  } else if (state === 'warning') {
+    captureStatusBannerEl.classList.add('warning');
+  }
+
+  if (state !== 'loading') {
+    const hideAfterMs = typeof payload?.hideAfterMs === 'number'
+      ? payload.hideAfterMs
+      : 7000;
+    captureStatusTimeout = setTimeout(() => {
+      hideCaptureStatus();
+    }, hideAfterMs);
+  }
 }
 
 function normalizeSettings(value = {}) {
@@ -2655,6 +2701,11 @@ chrome.runtime.onMessage.addListener((message) => {
     applyFontSize(nextSettings.uiFontSize);
     renderOverviewTab(currentSession);
     renderSettingsTab();
+    return;
+  }
+
+  if (message.type === 'CAPTURE_STATUS') {
+    showCaptureStatus(message.payload);
   }
 });
 
