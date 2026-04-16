@@ -1,5 +1,13 @@
 import { evaluateDrift } from './driftDetector.js';
 import { notifyDrift, shouldSendNotification } from './notificationManager.js';
+import {
+  contentTypeSuggestsPdf,
+  resolvePdfResourceUrl,
+  shouldProbePdfContentType,
+  tabCouldBePdf,
+  urlClearlyIndicatesPdf,
+} from './pdf/pdfDetection.js';
+import { extractPdfText } from './pdf/pdfTextExtractor.js';
 import { scorePageRelevance } from './relevanceScorer.js';
 import {
   addManualOverride,
@@ -33,7 +41,13 @@ const DEFAULT_SETTINGS = {
 };
 
 const DRIFT_ALARM_NAME = 'drift-tick';
+const PDF_STATUS_LOADING_MESSAGE = 'Reading PDF...';
+const PDF_STATUS_GENERIC_ERROR = 'Could not process this PDF right now.';
+const LOCAL_FILE_ACCESS_ERROR =
+  "Local PDF access is blocked. Enable 'Allow access to file URLs' for this extension.";
 let currentIdleState = 'active';
+const pdfCaptureKeysInFlight = new Set();
+const lastAutoCapturedPdfKeysByTab = new Map();
 
 chrome.runtime.onInstalled.addListener(async () => {
   const existing = await chrome.storage.local.get(['settings']);
@@ -63,12 +77,22 @@ if (!chrome.sidePanel?.setPanelBehavior) {
 
 chrome.tabs.onActivated.addListener(async () => {
   await syncActiveTabState('tabs.onActivated');
+  await maybeAutoCaptureCurrentPdfTab('tabs.onActivated');
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'loading' || changeInfo.url) {
+    lastAutoCapturedPdfKeysByTab.delete(tabId);
+  }
+
   if (changeInfo.status !== 'complete') return;
   if (!tab?.active) return;
   await syncActiveTabState('tabs.onUpdated');
+  await maybeAutoCapturePdfTab(tab, 'tabs.onUpdated');
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  lastAutoCapturedPdfKeysByTab.delete(tabId);
 });
 
 chrome.windows.onFocusChanged.addListener(async (windowId) => {
@@ -265,6 +289,7 @@ async function syncDriftToCurrentSession(reason, { resetTracking = false } = {})
   }
 
   await syncActiveTabState(reason);
+  await maybeAutoCaptureCurrentPdfTab(reason);
   return session;
 }
 
@@ -359,9 +384,83 @@ async function startSession(payload) {
   return session;
 }
 
-async function handlePageContent(payload, sender) {
+function getEffectiveTabUrl(tab) {
+  return resolvePdfResourceUrl(tab) || tab?.url || '';
+}
+
+function normalizeHtmlDocument(payload, senderTab) {
+  const extractedAt = payload?.metadata?.extractedAt || payload?.timestamp || new Date().toISOString();
+
+  return {
+    sourceType: 'html',
+    url: payload?.url || senderTab?.url || '',
+    title: payload?.title || senderTab?.title || '',
+    content: String(payload?.content || '').trim(),
+    selection: payload?.selection || '',
+    metadata: {
+      extractedAt,
+      extractionMethod: payload?.metadata?.extractionMethod || 'content-script-innerText',
+    },
+  };
+}
+
+function buildTrackedSource(document, analyzedAt = new Date().toISOString()) {
+  const metadata = document?.metadata && typeof document.metadata === 'object'
+    ? document.metadata
+    : {};
+
+  return {
+    url: document?.url || '',
+    title: document?.title || '',
+    domain: safeDomain(document?.url || ''),
+    sourceType: document?.sourceType || 'html',
+    pageCount: Number.isFinite(metadata.pageCount) ? metadata.pageCount : undefined,
+    extractionMethod: metadata.extractionMethod || '',
+    extractedAt: metadata.extractedAt || analyzedAt,
+    analyzedAt,
+  };
+}
+
+function mergeAnalysisIntoSession(session, analysis, source, { persistInsights = false } = {}) {
+  const existingSources = Array.isArray(session?.sources) ? session.sources : [];
+  const existingInsights = Array.isArray(session?.insights) ? session.insights : [];
+  const nextInsights = persistInsights
+    ? mergeInsights(existingInsights, analysis?.insights || [], source)
+    : existingInsights;
+
+  return {
+    ...session,
+    sources: mergeSources(existingSources, source),
+    insights: nextInsights,
+    topics: persistInsights ? collectTopicsFromInsights(nextInsights) : session.topics,
+    missingTopics: Array.isArray(analysis?.missing_topics)
+      ? analysis.missing_topics
+      : session.missingTopics,
+  };
+}
+
+function mergeInsightsIntoSession(session, insights, source) {
+  const existingInsights = Array.isArray(session?.insights) ? session.insights : [];
+  const existingSources = Array.isArray(session?.sources) ? session.sources : [];
+  const updatedInsights = mergeInsights(existingInsights, insights, source);
+
+  return {
+    updatedSession: {
+      ...session,
+      insights: updatedInsights,
+      topics: collectTopicsFromInsights(updatedInsights),
+      sources: mergeSources(existingSources, source),
+    },
+    addedCount: Math.max(0, updatedInsights.length - existingInsights.length),
+    sourceAlreadyTracked: existingSources.some((item) => item.url === source.url),
+    updatedInsights,
+  };
+}
+
+async function analyzeExtractedDocument(document, { activeTabId = null, persistInsights = false } = {}) {
   const settings = await getSettings();
   const session = await getCurrentSession();
+  const minimumContentLength = document?.sourceType === 'pdf' ? 80 : 200;
 
   if (!settings.autoAnalyze) {
     return { skipped: true, reason: 'Auto analysis disabled' };
@@ -380,7 +479,7 @@ async function handlePageContent(payload, sender) {
     };
   }
 
-  if (!payload?.content || payload.content.trim().length < 200) {
+  if (!document?.content || document.content.trim().length < minimumContentLength) {
     return { skipped: true, reason: 'Insufficient page content' };
   }
 
@@ -391,8 +490,8 @@ async function handlePageContent(payload, sender) {
       goal: session.goal,
       questions: session.researchQuestions,
       page: {
-        ...payload,
-        content: payload.content.slice(0, settings.maxContentLength),
+        ...document,
+        content: document.content.slice(0, settings.maxContentLength),
       },
     }),
   });
@@ -402,22 +501,10 @@ async function handlePageContent(payload, sender) {
   }
 
   const analysis = await response.json();
-  const source = {
-    url: payload.url,
-    title: payload.title,
-    domain: safeDomain(payload.url),
-    analyzedAt: new Date().toISOString(),
-  };
+  const source = buildTrackedSource(document);
+  const updatedSession = mergeAnalysisIntoSession(session, analysis, source, { persistInsights });
+  await commitSessionUpdate(updatedSession);
 
-  const updated = {
-    ...session,
-    sources: mergeSources(session.sources, source),
-    missingTopics: analysis.missing_topics || session.missingTopics,
-  };
-
-  await commitSessionUpdate(updated);
-
-  const activeTabId = sender?.tab?.id;
   if (activeTabId && analysis.page_summary) {
     try {
       await chrome.tabs.sendMessage(activeTabId, {
@@ -430,6 +517,332 @@ async function handlePageContent(payload, sender) {
   }
 
   return analysis;
+}
+
+function deriveTitleFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const lastSegment = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() || '');
+    if (lastSegment) {
+      return lastSegment;
+    }
+    return parsed.hostname || 'Untitled PDF';
+  } catch {
+    return 'Untitled PDF';
+  }
+}
+
+function buildPdfTitle(tab, url) {
+  const tabTitle = String(tab?.title || '').trim();
+  if (tabTitle && !/^chrome pdf viewer$/i.test(tabTitle)) {
+    return tabTitle;
+  }
+
+  return deriveTitleFromUrl(url);
+}
+
+function buildPdfError(code, message, details = '', metadata = {}) {
+  return {
+    code,
+    message,
+    details,
+    metadata,
+  };
+}
+
+async function probePdfContentType(url) {
+  try {
+    const response = await fetch(url, { method: 'HEAD' });
+    if (!response.ok) {
+      return '';
+    }
+    return response.headers.get('content-type') || '';
+  } catch {
+    return '';
+  }
+}
+
+async function detectPdfTab(tab) {
+  const hint = tabCouldBePdf(tab);
+  if (hint.isPdfHint) {
+    return {
+      isPdf: true,
+      url: hint.resolvedUrl,
+      detectionReason: hint.reasons.join(','),
+    };
+  }
+
+  if (!shouldProbePdfContentType(tab, hint.resolvedUrl)) {
+    return {
+      isPdf: false,
+      url: hint.resolvedUrl,
+      detectionReason: '',
+    };
+  }
+
+  const contentType = await probePdfContentType(hint.resolvedUrl);
+  if (contentTypeSuggestsPdf(contentType)) {
+    return {
+      isPdf: true,
+      url: hint.resolvedUrl,
+      detectionReason: 'content-type',
+    };
+  }
+
+  return {
+    isPdf: false,
+    url: hint.resolvedUrl,
+    detectionReason: '',
+  };
+}
+
+async function isAllowedFileSchemeAccess() {
+  if (!chrome.extension?.isAllowedFileSchemeAccess) {
+    return false;
+  }
+
+  return new Promise((resolve) => {
+    chrome.extension.isAllowedFileSchemeAccess((isAllowed) => {
+      resolve(Boolean(isAllowed));
+    });
+  });
+}
+
+async function fetchPdfBytes(url) {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: buildPdfError('PDF_FETCH_FAILED', 'Could not read this PDF.', `HTTP ${response.status}`),
+      };
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    const finalUrl = response.url || url;
+    if (!contentTypeSuggestsPdf(contentType) && !urlClearlyIndicatesPdf(finalUrl)) {
+      return {
+        ok: false,
+        error: buildPdfError('PDF_NOT_DETECTED', 'Could not read this PDF.', 'Response was not application/pdf.'),
+      };
+    }
+
+    return {
+      ok: true,
+      bytes: new Uint8Array(await response.arrayBuffer()),
+      contentType,
+      finalUrl,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: buildPdfError('PDF_FETCH_FAILED', 'Could not read this PDF.', error?.message || ''),
+    };
+  }
+}
+
+// PDF.js runs directly in the service worker here because text extraction only needs raw bytes.
+// That keeps PDFs on the same capture path as HTML without depending on Chrome's viewer DOM.
+async function extractPdfDocumentFromTab(tab, pdfDetection) {
+  const targetUrl = pdfDetection?.url || getEffectiveTabUrl(tab);
+  if (!targetUrl) {
+    return {
+      ok: false,
+      error: buildPdfError('PDF_URL_MISSING', 'Could not read this PDF.'),
+    };
+  }
+
+  if (targetUrl.startsWith('blob:')) {
+    return {
+      ok: false,
+      error: buildPdfError('PDF_BLOB_UNSUPPORTED', 'Could not read this PDF.'),
+    };
+  }
+
+  if (targetUrl.startsWith('file:')) {
+    const allowed = await isAllowedFileSchemeAccess();
+    if (!allowed) {
+      return {
+        ok: false,
+        error: buildPdfError('LOCAL_FILE_ACCESS_BLOCKED', LOCAL_FILE_ACCESS_ERROR),
+      };
+    }
+  }
+
+  const fetched = await fetchPdfBytes(targetUrl);
+  if (!fetched.ok) {
+    return fetched;
+  }
+
+  const parsed = await extractPdfText(fetched.bytes);
+  if (!parsed.ok) {
+    return {
+      ok: false,
+      error: buildPdfError(
+        parsed.error?.code || 'PDF_PARSE_FAILED',
+        parsed.error?.message || 'Could not read this PDF.',
+        parsed.error?.details || '',
+        parsed.metadata || {},
+      ),
+    };
+  }
+
+  return {
+    ok: true,
+    document: {
+      sourceType: 'pdf',
+      url: fetched.finalUrl,
+      title: buildPdfTitle(tab, fetched.finalUrl),
+      content: parsed.content,
+      metadata: {
+        pageCount: parsed.metadata?.pageCount,
+        extractedAt: new Date().toISOString(),
+        extractionMethod: 'pdfjs-service-worker',
+        contentType: fetched.contentType || undefined,
+        detectionReason: pdfDetection?.detectionReason || undefined,
+      },
+    },
+  };
+}
+
+async function extractCurrentTabContent({ htmlPayload, senderTab, tab, pdfDetection } = {}) {
+  if (htmlPayload) {
+    return {
+      ok: true,
+      document: normalizeHtmlDocument(htmlPayload, senderTab),
+    };
+  }
+
+  const detection = pdfDetection || await detectPdfTab(tab);
+  if (!detection.isPdf) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: 'Not a PDF tab',
+    };
+  }
+
+  return extractPdfDocumentFromTab(tab, detection);
+}
+
+async function broadcastCaptureStatus(payload) {
+  try {
+    await chrome.runtime.sendMessage({ type: 'CAPTURE_STATUS', payload });
+  } catch {
+    // Ignore when no extension page is listening.
+  }
+}
+
+async function maybeAutoCaptureCurrentPdfTab(reason) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) {
+    return null;
+  }
+
+  return maybeAutoCapturePdfTab(tab, reason);
+}
+
+async function maybeAutoCapturePdfTab(tab, reason) {
+  const settings = await getSettings();
+  const session = await getCurrentSession();
+  if (!settings.autoAnalyze || !isSessionActive(session) || !tab?.id) {
+    return { skipped: true, reason: 'No active auto-analysis session' };
+  }
+
+  const pdfDetection = await detectPdfTab(tab);
+  if (!pdfDetection.isPdf) {
+    return { skipped: true, reason: 'Not a PDF tab' };
+  }
+
+  const captureKey = `${session.id}::${session.goal}::${pdfDetection.url}`;
+  if (
+    pdfCaptureKeysInFlight.has(captureKey)
+    || lastAutoCapturedPdfKeysByTab.get(tab.id) === captureKey
+  ) {
+    return { skipped: true, reason: 'PDF already captured' };
+  }
+
+  pdfCaptureKeysInFlight.add(captureKey);
+  await broadcastCaptureStatus({
+    state: 'loading',
+    sourceType: 'pdf',
+    message: PDF_STATUS_LOADING_MESSAGE,
+    url: pdfDetection.url,
+  });
+
+  try {
+    const extracted = await extractCurrentTabContent({ tab, pdfDetection });
+    if (!extracted.ok) {
+      if (extracted.error?.message) {
+        await broadcastCaptureStatus({
+          state: extracted.error.code === 'PDF_TEXT_UNAVAILABLE' ? 'warning' : 'error',
+          sourceType: 'pdf',
+          message: extracted.error.message,
+          url: pdfDetection.url,
+        });
+      } else {
+        await broadcastCaptureStatus({
+          state: 'idle',
+          sourceType: 'pdf',
+          url: pdfDetection.url,
+        });
+      }
+      return extracted;
+    }
+
+    const analysis = await analyzeExtractedDocument(extracted.document, {
+      activeTabId: tab.id,
+      persistInsights: true,
+    });
+
+    if (analysis?.skipped) {
+      await broadcastCaptureStatus({
+        state: 'error',
+        sourceType: 'pdf',
+        message: analysis.reason || 'Could not read this PDF.',
+        url: extracted.document.url,
+      });
+      return analysis;
+    }
+
+    lastAutoCapturedPdfKeysByTab.set(tab.id, captureKey);
+    await broadcastCaptureStatus({
+      state: 'idle',
+      sourceType: 'pdf',
+      url: extracted.document.url,
+    });
+    return analysis;
+  } catch (error) {
+    console.error(`PDF capture failed during ${reason}`, error);
+    await broadcastCaptureStatus({
+      state: 'error',
+      sourceType: 'pdf',
+      message: PDF_STATUS_GENERIC_ERROR,
+      url: pdfDetection.url,
+    });
+    return {
+      ok: false,
+      error: buildPdfError('PDF_CAPTURE_FAILED', PDF_STATUS_GENERIC_ERROR, error?.message || ''),
+    };
+  } finally {
+    pdfCaptureKeysInFlight.delete(captureKey);
+  }
+}
+
+async function handlePageContent(payload, sender) {
+  const extracted = await extractCurrentTabContent({
+    htmlPayload: payload,
+    senderTab: sender?.tab,
+  });
+
+  if (!extracted.ok) {
+    return extracted;
+  }
+
+  return analyzeExtractedDocument(extracted.document, {
+    activeTabId: sender?.tab?.id || null,
+    persistInsights: false,
+  });
 }
 
 async function saveAnalysisInsights(payload, sender) {
@@ -445,33 +858,22 @@ async function saveAnalysisInsights(payload, sender) {
 
   const sourceUrl = payload?.page?.url || sender?.tab?.url || '';
   const sourceTitle = payload?.page?.title || sender?.tab?.title || '';
-  const source = {
+  const source = buildTrackedSource({
+    sourceType: payload?.page?.sourceType || 'html',
     url: sourceUrl,
     title: sourceTitle,
-    domain: safeDomain(sourceUrl),
-    analyzedAt: new Date().toISOString(),
-  };
+    metadata: payload?.page?.metadata || {},
+  });
 
-  const existingInsights = Array.isArray(session.insights) ? session.insights : [];
-  const existingSources = Array.isArray(session.sources) ? session.sources : [];
-  const updatedInsights = mergeInsights(existingInsights, insights, source);
-  const sourceAlreadyTracked = existingSources.some((item) => item.url === source.url);
-
-  if (updatedInsights.length === existingInsights.length && sourceAlreadyTracked) {
+  const merged = mergeInsightsIntoSession(session, insights, source);
+  if (merged.addedCount === 0 && merged.sourceAlreadyTracked) {
     return { saved: true, addedCount: 0, session };
   }
 
-  const updated = {
-    ...session,
-    insights: updatedInsights,
-    topics: collectTopicsFromInsights(updatedInsights),
-    sources: mergeSources(existingSources, source),
-  };
-
-  const savedSession = await commitSessionUpdate(updated);
+  const savedSession = await commitSessionUpdate(merged.updatedSession);
   return {
     saved: true,
-    addedCount: Math.max(0, updatedInsights.length - existingInsights.length),
+    addedCount: merged.addedCount,
     session: savedSession,
   };
 }
@@ -539,7 +941,7 @@ async function handleUserActivityHeartbeat(payload, sender) {
   };
 
   if (tab?.id && tab.id === updated.currentTabId) {
-    updated.currentUrl = payload?.url || tab.url || updated.currentUrl;
+    updated.currentUrl = payload?.url || getEffectiveTabUrl(tab) || updated.currentUrl;
     updated.currentDomain = safeDomain(updated.currentUrl || '');
     updated.currentTitle = payload?.title || tab.title || updated.currentTitle;
     if (payload?.snippet) {
@@ -559,7 +961,7 @@ async function handleMarkPageRelevant(payload, sender) {
     return { marked: false, reason: 'No active session id' };
   }
 
-  const url = payload?.url || sender?.tab?.url;
+  const url = payload?.url || getEffectiveTabUrl(sender?.tab);
   if (!url) {
     return { marked: false, reason: 'No URL to mark' };
   }
@@ -578,17 +980,18 @@ async function syncActiveTabState(reason) {
 
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!activeTab?.id || !activeTab.url) return;
+  const activeTabUrl = getEffectiveTabUrl(activeTab);
 
   const now = Date.now();
   const samePage =
     browsingState.currentTabId === activeTab.id &&
-    browsingState.currentUrl === activeTab.url;
+    browsingState.currentUrl === activeTabUrl;
 
   if (samePage) {
     const refreshed = {
       ...browsingState,
       currentTitle: activeTab.title || browsingState.currentTitle,
-      currentDomain: safeDomain(activeTab.url),
+      currentDomain: safeDomain(activeTabUrl),
       lastUserActivityAt: now,
     };
     await setBrowsingState(refreshed);
@@ -598,8 +1001,8 @@ async function syncActiveTabState(reason) {
   const history = finalizeCurrentHistoryItem(browsingState.recentHistory || [], now);
   history.push({
     tabId: activeTab.id,
-    url: activeTab.url,
-    domain: safeDomain(activeTab.url),
+    url: activeTabUrl,
+    domain: safeDomain(activeTabUrl),
     title: activeTab.title || '',
     startedAt: now,
     endedAt: null,
@@ -616,8 +1019,8 @@ async function syncActiveTabState(reason) {
   const updated = {
     ...browsingState,
     currentTabId: activeTab.id,
-    currentUrl: activeTab.url,
-    currentDomain: safeDomain(activeTab.url),
+    currentUrl: activeTabUrl,
+    currentDomain: safeDomain(activeTabUrl),
     currentTitle: activeTab.title || '',
     currentSnippet: '',
     currentTabStartedAt: now,
@@ -626,7 +1029,7 @@ async function syncActiveTabState(reason) {
   };
 
   await setBrowsingState(updated);
-  logDrift(driftSettings.debug, 'tab synced', { reason, url: activeTab.url, domain: updated.currentDomain });
+  logDrift(driftSettings.debug, 'tab synced', { reason, url: activeTabUrl, domain: updated.currentDomain });
 }
 
 function finalizeCurrentHistoryItem(history, now) {
@@ -793,8 +1196,8 @@ function collectTopicsFromInsights(insights) {
 }
 
 function mergeInsights(existing, incoming, source) {
-  const normalized = [...existing];
-  for (const item of incoming) {
+  const normalized = [...(Array.isArray(existing) ? existing : [])];
+  for (const item of Array.isArray(incoming) ? incoming : []) {
     const key = insightKey(item);
     const index = normalized.findIndex((x) => insightKey(x) === key);
     if (index === -1) {
@@ -818,11 +1221,12 @@ function mergeInsights(existing, incoming, source) {
 }
 
 function mergeSources(existing, source) {
-  const found = existing.find((x) => x.url === source.url);
+  const normalized = Array.isArray(existing) ? existing : [];
+  const found = normalized.find((x) => x.url === source.url);
   if (found) {
-    return existing.map((x) => (x.url === source.url ? { ...x, ...source } : x));
+    return normalized.map((x) => (x.url === source.url ? { ...x, ...source } : x));
   }
-  return [source, ...existing];
+  return [source, ...normalized];
 }
 
 function safeDomain(url) {

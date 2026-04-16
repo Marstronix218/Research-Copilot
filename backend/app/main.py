@@ -1,6 +1,6 @@
 import json
 import os
-from typing import List
+from typing import Any, Dict, List
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -51,11 +51,13 @@ class SessionInitResponse(BaseModel):
 
 
 class PagePayload(BaseModel):
+    sourceType: str | None = "html"
     url: str
     title: str
     content: str
     selection: str | None = ""
     timestamp: str | None = None
+    metadata: Dict[str, Any] | None = None
 
 
 class AnalyzeRequest(BaseModel):
@@ -131,6 +133,7 @@ You are analyzing a web page for an AI-assisted research workflow.
 
 Research goal: {req.goal}
 Research questions: {json.dumps(req.questions, ensure_ascii=False)}
+Page source type: {req.page.sourceType or 'html'}
 Page title: {req.page.title}
 Page URL: {req.page.url}
 Selected text: {req.page.selection or ''}

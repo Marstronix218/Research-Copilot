@@ -287,6 +287,27 @@ button.danger {
   color: #1d4ed8;
 }
 
+.capture-status-banner {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+  line-height: 1.45;
+}
+
+.capture-status-banner.warning {
+  border-color: #fcd34d;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.capture-status-banner.error {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
 .segmented-control {
   display: inline-flex;
   align-items: center;
