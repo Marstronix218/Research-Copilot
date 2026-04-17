@@ -1,3 +1,11 @@
+// Background service worker orchestrator.
+//
+// Responsibilities:
+// - session lifecycle and persistence,
+// - HTML/PDF capture and backend analysis,
+// - drift scoring and notification dispatch,
+// - extension-to-UI messaging.
+
 import { evaluateDrift } from './driftDetector.js';
 import { notifyDrift, shouldSendNotification } from './notificationManager.js';
 import {
@@ -49,6 +57,7 @@ let currentIdleState = 'active';
 const pdfCaptureKeysInFlight = new Set();
 const lastAutoCapturedPdfKeysByTab = new Map();
 
+// Startup wiring keeps storage and alarms ready regardless of browser lifecycle path.
 chrome.runtime.onInstalled.addListener(async () => {
   const existing = await chrome.storage.local.get(['settings']);
   if (!existing.settings) {
@@ -111,6 +120,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   await runDriftTick('alarm');
 });
 
+// Central message router for popup/sidebar/content-script requests.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     switch (message.type) {
@@ -206,6 +216,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function ensureDriftAlarm() {
+  // One-minute cadence keeps drift state fresh without frequent wakeups.
   const alarm = await chrome.alarms.get(DRIFT_ALARM_NAME);
   if (!alarm) {
     chrome.alarms.create(DRIFT_ALARM_NAME, { periodInMinutes: 1 });
@@ -230,6 +241,7 @@ async function getSettings() {
 }
 
 async function buildSessionStatePayload() {
+  // Bundle state in one response so sidebar can render atomically.
   const [settings, session, currentSessionId, allSessions] = await Promise.all([
     getSettings(),
     getCurrentSession(),
@@ -354,6 +366,7 @@ function logDrift(enabled, ...args) {
 }
 
 async function startSession(payload) {
+  // Create backend-generated seed questions, then persist a fresh active session.
   const settings = await getSettings();
   const response = await fetch(`${settings.backendUrl}/session/init`, {
     method: 'POST',
@@ -458,6 +471,7 @@ function mergeInsightsIntoSession(session, insights, source) {
 }
 
 async function analyzeExtractedDocument(document, { activeTabId = null, persistInsights = false } = {}) {
+  // Shared analysis path for both HTML and PDF captures.
   const settings = await getSettings();
   const session = await getCurrentSession();
   const minimumContentLength = document?.sourceType === 'pdf' ? 80 : 200;
@@ -563,6 +577,7 @@ async function probePdfContentType(url) {
 }
 
 async function detectPdfTab(tab) {
+  // Use cheap URL/title heuristics first, then optional HEAD content-type probe.
   const hint = tabCouldBePdf(tab);
   if (hint.isPdfHint) {
     return {
@@ -743,6 +758,7 @@ async function maybeAutoCaptureCurrentPdfTab(reason) {
 }
 
 async function maybeAutoCapturePdfTab(tab, reason) {
+  // Deduplicate by session+goal+url so refreshes do not re-analyze the same PDF.
   const settings = await getSettings();
   const session = await getCurrentSession();
   if (!settings.autoAnalyze || !isSessionActive(session) || !tab?.id) {
@@ -1050,6 +1066,8 @@ function finalizeCurrentHistoryItem(history, now) {
 
 async function runDriftTick(trigger) {
   // TODO: Add lightweight session analytics counters for drift events over time.
+  // This tick computes relevance, updates browsing history, evaluates drift,
+  // and emits at most one notification per cooldown window.
   const session = await getCurrentSession();
   if (!isSessionActive(session)) return;
 
@@ -1196,6 +1214,7 @@ function collectTopicsFromInsights(insights) {
 }
 
 function mergeInsights(existing, incoming, source) {
+  // Merge by topic+summary key and attach additional source provenance.
   const normalized = [...(Array.isArray(existing) ? existing : [])];
   for (const item of Array.isArray(incoming) ? incoming : []) {
     const key = insightKey(item);

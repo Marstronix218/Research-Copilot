@@ -1,9 +1,20 @@
+"""FastAPI backend for the Research Copilot browser extension.
+
+This module exposes endpoints for:
+- Creating research sessions and seed questions.
+- Analyzing captured page content for insights.
+- Running a multi-turn goal-clarification flow.
+
+Most endpoints use the configured LLM when available and fall back to
+heuristic behavior when the model call fails.
+"""
+
 import json
 import os
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -36,21 +47,45 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 
 try:
     from openai import OpenAI
+
+    # Keep client optional so the backend can run in heuristic-only mode.
     client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 except Exception:
     client = None
 
 
 class SessionInitRequest(BaseModel):
+    """Request body for creating a new research session.
+
+    Input:
+        goal: User's research goal statement.
+    """
+
     goal: str = Field(..., min_length=3, max_length=500)
 
 
 class SessionInitResponse(BaseModel):
+    """Response payload containing normalized goal and starter questions.
+
+    Output:
+        goal: Goal used for question generation.
+        questions: Seed research questions for browsing.
+    """
+
     goal: str
     questions: List[str]
 
 
 class PagePayload(BaseModel):
+    """Captured page payload sent from the extension for analysis.
+
+    Input:
+        sourceType: Document type such as html or pdf.
+        url/title/content: Captured page metadata and text.
+        selection: Optional selected user text.
+        timestamp/metadata: Optional extraction details.
+    """
+
     sourceType: str | None = "html"
     url: str
     title: str
@@ -61,12 +96,29 @@ class PagePayload(BaseModel):
 
 
 class AnalyzeRequest(BaseModel):
+    """Request body for page analysis against the current research goal.
+
+    Input:
+        goal: Active research goal.
+        questions: Session research questions.
+        page: Captured document payload.
+    """
+
     goal: str
     questions: List[str] = []
     page: PagePayload
 
 
 class Insight(BaseModel):
+    """Single insight item returned by analysis.
+
+    Output:
+        topic: Insight category.
+        summary: Human-readable takeaway.
+        evidence: Supporting fragment, quote, or source hint.
+        relevance: Qualitative confidence label.
+    """
+
     topic: str
     summary: str
     evidence: str | None = ""
@@ -74,6 +126,15 @@ class Insight(BaseModel):
 
 
 class AnalyzeResponse(BaseModel):
+    """Structured analysis response consumed by the sidebar UI.
+
+    Output:
+        primary_topic: Main page topic.
+        page_summary: Short overall summary.
+        insights: Key extracted insights.
+        missing_topics: Research questions not covered by this page.
+    """
+
     primary_topic: str
     page_summary: str
     insights: List[Insight]
@@ -82,11 +143,35 @@ class AnalyzeResponse(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"healthy": True, "model": OPENAI_MODEL, "llm_enabled": bool(client)}
+    """Return backend health metadata for extension connectivity checks.
+
+    Returns:
+        Dict with server status, configured model, and LLM availability.
+    """
+
+    return {
+        "healthy": True,
+        "model": OPENAI_MODEL,
+        "llm_enabled": bool(client),
+    }
 
 
 @app.post("/session/init", response_model=SessionInitResponse)
 def initialize_session(req: SessionInitRequest):
+    """Create starter research questions for a new session.
+
+    Args:
+        req: Session initialization request containing the research goal.
+
+    Returns:
+        SessionInitResponse with generated or heuristic question list.
+
+    Steps:
+        1. Attempt LLM-based JSON question generation.
+        2. Parse and validate questions from model output.
+        3. Fall back to deterministic question templates on failure.
+    """
+
     if client:
         prompt = f"""
 You are helping a user structure a browsing-based research session.
@@ -104,6 +189,7 @@ Rules:
 - No markdown.
 """.strip()
         try:
+            # Step 1-2: Generate and parse structured questions via LLM.
             completion = client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[
@@ -119,6 +205,8 @@ Rules:
             if questions:
                 return SessionInitResponse(goal=req.goal, questions=questions)
         except Exception:
+            # Fall back to local heuristics for availability and predictable
+            # UX.
             pass
 
     fallback_questions = heuristic_questions(req.goal)
@@ -127,6 +215,20 @@ Rules:
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze_page(req: AnalyzeRequest):
+    """Analyze captured page content and return actionable research insights.
+
+    Args:
+        req: Analysis request containing goal, questions, and page payload.
+
+    Returns:
+        AnalyzeResponse from LLM or heuristic fallback.
+
+    Steps:
+        1. Build a strict JSON extraction prompt.
+        2. Attempt model analysis and parse typed response.
+        3. Fall back to heuristic extraction if model call fails.
+    """
+
     if client:
         prompt = f"""
 You are analyzing a web page for an AI-assisted research workflow.
@@ -162,6 +264,7 @@ Rules:
 - No markdown.
 """.strip()
         try:
+            # Step 1-2: Ask the model for strict JSON and validate via schema.
             completion = client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[
@@ -182,6 +285,15 @@ Rules:
 
 
 def heuristic_questions(goal: str) -> List[str]:
+    """Generate baseline research questions when the LLM is unavailable.
+
+    Args:
+        goal: User research goal text.
+
+    Returns:
+        A stable list of question templates derived from the goal.
+    """
+
     templates = [
         f"How is {goal} defined or measured?",
         f"What are the main causes or drivers of {goal}?",
@@ -195,7 +307,21 @@ def heuristic_questions(goal: str) -> List[str]:
 # ── Goal clarification endpoints ──────────────────────────────────────────────
 
 def _call_llm_for_clarification(system: str, user: str) -> dict:
-    """Call the LLM and parse a clarification response; raises on failure."""
+    """Call the LLM for goal clarification and parse normalized output.
+
+    Args:
+        system: System message defining clarifier behavior.
+        user: User prompt for the current clarification turn.
+
+    Returns:
+        Normalized clarification payload from parse_clarification_response.
+
+    Steps:
+        1. Execute model call with JSON response mode.
+        2. Read message content.
+        3. Parse and validate response shape.
+    """
+
     completion = client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=[
@@ -211,6 +337,15 @@ def _call_llm_for_clarification(system: str, user: str) -> dict:
 
 @app.post("/api/clarify-goal/start")
 def clarify_goal_start(req: ClarifyStartRequest):
+    """Start the clarification flow.
+
+    Args:
+        req: ClarifyStartRequest with the rough goal text.
+
+    Returns:
+        Clarification payload from LLM or heuristic fallback.
+    """
+
     if client:
         try:
             prompt = build_start_prompt(req.roughGoal)
@@ -222,6 +357,15 @@ def clarify_goal_start(req: ClarifyStartRequest):
 
 @app.post("/api/clarify-goal/next")
 def clarify_goal_next(req: ClarifyNextRequest):
+    """Advance clarification using chat history and collected answers.
+
+    Args:
+        req: ClarifyNextRequest containing ongoing conversation state.
+
+    Returns:
+        Next clarification message or final clarified goal payload.
+    """
+
     if client:
         try:
             prompt = build_next_prompt(req.roughGoal, req.chatHistory, req.answers)
@@ -233,6 +377,15 @@ def clarify_goal_next(req: ClarifyNextRequest):
 
 @app.post("/api/clarify-goal/refine")
 def clarify_goal_refine(req: ClarifyRefineRequest):
+    """Refine an already proposed clarified goal.
+
+    Args:
+        req: ClarifyRefineRequest including current clarified goal candidate.
+
+    Returns:
+        Refined goal payload or follow-up clarification question payload.
+    """
+
     if client:
         try:
             prompt = build_refine_prompt(
@@ -245,12 +398,27 @@ def clarify_goal_refine(req: ClarifyRefineRequest):
 
 
 def heuristic_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
+    """Return a best-effort analysis when LLM analysis is unavailable.
+
+    Args:
+        req: Analysis request with goal, questions, and page content.
+
+    Returns:
+        AnalyzeResponse with a summary insight and inferred missing topics.
+
+    Steps:
+        1. Build a short page summary from captured content.
+        2. Mark covered questions via simple keyword overlap.
+        3. Return one conservative insight and remaining missing topics.
+    """
+
     title = req.page.title or "Untitled page"
     content = req.page.content
     summary = content[:240].strip()
     if len(content) > 240:
         summary += "..."
 
+    # Step 2: mark questions as covered when key terms appear in page text.
     covered = []
     lower_content = content.lower()
     for q in req.questions:
@@ -261,6 +429,7 @@ def heuristic_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
 
     missing = [q for q in req.questions if q not in covered]
 
+    # Step 3: emit a minimal but consistent insight payload.
     insights = [
         Insight(
             topic=title[:80],

@@ -1,1 +1,1 @@
-# Package marker
+"""Research Copilot backend application package."""

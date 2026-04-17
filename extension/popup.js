@@ -1,3 +1,5 @@
+// Minimal launcher popup that opens the sidepanel workspace.
+
 async function sendMessage(type, payload = {}) {
   const response = await chrome.runtime.sendMessage({ type, payload });
   if (!response?.ok) {
@@ -7,6 +9,7 @@ async function sendMessage(type, payload = {}) {
 }
 
 async function openSidepanel() {
+  // Open sidepanel in the currently focused window.
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.windowId) {
     await chrome.sidePanel.open({ windowId: tab.windowId });
@@ -14,6 +17,7 @@ async function openSidepanel() {
 }
 
 function getStatusText(session) {
+  // Keep this summary short because popup vertical space is limited.
   if (!session?.id) {
     return 'No session selected. Start or reopen one from the sidepanel.';
   }
@@ -33,6 +37,7 @@ document.getElementById('openPanelBtn').addEventListener('click', async () => {
 });
 
 async function initializePopup() {
+  // Load current session status so the launcher reflects extension state.
   try {
     const state = await sendMessage('GET_SESSION');
     document.getElementById('popupStatusLine').textContent = getStatusText(state.session);

@@ -1,3 +1,7 @@
+// Insight grouping utility exposed on globalThis for sidebar consumption.
+// It clusters saved insights using explainable lexical/source heuristics so
+// grouped and timeline views can share one normalized view model.
+
 (function installInsightGroupingApi(global) {
   const SHORT_DISPLAY_TOKENS = new Map([
     ['ai', 'AI'],
@@ -380,6 +384,7 @@
   }
 
   function clusterInsightsHeuristic(normalizedInsights, options = {}) {
+    // Greedy cluster assignment tuned for predictable, explainable behavior.
     const threshold = Number.isFinite(options.similarityThreshold) ? options.similarityThreshold : 0.34;
     const ordered = [...normalizedInsights].sort((a, b) => {
       return scoreInsightRichness(b) - scoreInsightRichness(a) || compareByAddedAtAscending(a, b);
@@ -561,6 +566,7 @@
   }
 
   function prepareInsightViewModel(insights, options = {}) {
+    // Build one canonical structure used by both grouped and timeline renderers.
     const normalizedInsights = safeArray(insights).map(normalizeInsight);
 
     if (!normalizedInsights.length) {

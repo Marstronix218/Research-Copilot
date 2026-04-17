@@ -1,3 +1,5 @@
+// Notification policy and message copy for drift-related nudges.
+
 function buildNotificationCopy(type, goal) {
   const safeGoal = goal ? `Goal: ${goal.slice(0, 90)}` : '';
 
@@ -28,6 +30,7 @@ function buildNotificationCopy(type, goal) {
 }
 
 export function shouldSendNotification({ driftState, evaluation, driftSettings, now }) {
+  // Gate notifications by event intent and cooldown windows to avoid spam.
   if (!evaluation.shouldNotify || !evaluation.notificationType) return false;
 
   const lastAt = driftState.lastNotificationAt || 0;
@@ -43,6 +46,7 @@ export function shouldSendNotification({ driftState, evaluation, driftSettings, 
 }
 
 export async function notifyDrift({ evaluation, goal, currentTabId }) {
+  // Send both a Chrome notification and an in-page toast when possible.
   const copy = buildNotificationCopy(evaluation.notificationType, goal);
   await chrome.notifications.create({
     type: 'basic',

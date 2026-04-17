@@ -1,3 +1,4 @@
+/* Design tokens shared across popup and sidepanel surfaces. */
 :root {
   color-scheme: light;
   --bg: #f8fafc;
@@ -15,6 +16,7 @@
   box-sizing: border-box;
 }
 
+/* Base typography and page-level defaults. */
 body {
   margin: 0;
   font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -27,6 +29,7 @@ body {
   width: 360px;
 }
 
+/* Popup launcher layout. */
 .popup-launcher {
   display: flex;
   flex-direction: column;
@@ -48,6 +51,7 @@ body {
   padding: 16px;
 }
 
+/* Shared text hierarchy. */
 h1, h2 {
   margin: 0 0 8px;
 }
@@ -78,6 +82,7 @@ input[type="range"] {
   width: 100%;
 }
 
+/* Form controls. */
 textarea,
 input[type="text"] {
   border: 1px solid var(--border);
@@ -146,6 +151,7 @@ button.danger {
   color: #92400e;
 }
 
+/* Generic card containers used in most tabs. */
 .card {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -308,6 +314,7 @@ button.danger {
   color: #b91c1c;
 }
 
+/* Segmented control used by grouped/timeline insights switching. */
 .segmented-control {
   display: inline-flex;
   align-items: center;

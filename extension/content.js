@@ -1,3 +1,11 @@
+// Content script responsible for:
+// 1) extracting page text for backend analysis,
+// 2) showing insight/drift toasts,
+// 3) sending lightweight user-activity heartbeats for drift detection.
+
+/**
+ * Pull text from the page's most meaningful container when possible.
+ */
 function extractMainText() {
   const article = document.querySelector('article');
   const main = document.querySelector('main');
@@ -5,6 +13,9 @@ function extractMainText() {
   return (target?.innerText || '').replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Build a normalized payload consumed by the background service worker.
+ */
 function buildPayload() {
   const extractedAt = new Date().toISOString();
   const selection = window.getSelection()?.toString() || '';
@@ -25,6 +36,7 @@ function buildPayload() {
 }
 
 async function sendPageContent() {
+  // Skip very short pages to reduce noisy backend calls.
   const payload = buildPayload();
   if (payload.content.length < 200) return;
 
@@ -45,6 +57,7 @@ let driftToastTimeout;
 let lastActivityHeartbeatAt = 0;
 
 function createBaseToast() {
+  // Shared base styling keeps insight and drift toasts visually consistent.
   const el = document.createElement('div');
   el.style.position = 'fixed';
   el.style.right = '20px';
@@ -87,6 +100,7 @@ function dismissAnalysisToast(toastEl = analysisToast) {
 }
 
 async function persistAnalysisInsights(result, controls) {
+  // Persist only when the user explicitly confirms via "Add to sidebar".
   const { toastEl, saveButton, dismissButton, closeButton, statusEl } = controls;
   if (!saveButton || saveButton.dataset.state === 'saving' || saveButton.dataset.state === 'saved') {
     return;
@@ -159,6 +173,7 @@ async function persistAnalysisInsights(result, controls) {
 }
 
 function showInsightNotification(result) {
+  // Render a short summary with an optional one-click "save insights" action.
   const insights = Array.isArray(result?.insights) ? result.insights : [];
   const hasInsights = insights.length > 0;
   const summaryText =
@@ -251,6 +266,7 @@ function scheduleAnalysisToastDismiss(delayMs, toastEl = analysisToast) {
 }
 
 function showDriftToast({ title, message, showRelevantButton }) {
+  // Drift toasts are intentionally distinct from analysis toasts to avoid confusion.
   if (!message) return;
 
   if (driftToast) driftToast.remove();
@@ -326,6 +342,7 @@ function escapeHtml(str) {
 }
 
 async function sendActivityHeartbeat(force = false) {
+  // Throttle heartbeats to keep messaging overhead low on active pages.
   const now = Date.now();
   if (!force && now - lastActivityHeartbeatAt < 25000) return;
 

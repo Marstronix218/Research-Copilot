@@ -1,3 +1,7 @@
+// PDF.js-based text extraction used in the extension service worker.
+// This module focuses on robust extraction for digital PDFs and explicit
+// signaling when a PDF appears image-only/scanned.
+
 const LINE_BREAK_THRESHOLD = 4;
 const PARAGRAPH_BREAK_THRESHOLD = 14;
 const MIN_TEXT_CHARACTERS = 80;
@@ -8,6 +12,7 @@ const PAGE_MARKER_PATTERN = /\[Page \d+\]\s*/g;
 let pdfjsPromise = null;
 
 function installParserShims() {
+  // PDF.js expects browser-like globals even in a worker context.
   if (!globalThis.DOMMatrix) {
     globalThis.DOMMatrix = class DOMMatrix {
       constructor(values = [1, 0, 0, 1, 0, 0]) {
@@ -56,6 +61,7 @@ function installParserShims() {
 }
 
 async function loadPdfJs() {
+  // Lazy-load once so repeated captures do not reload parser code.
   if (!pdfjsPromise) {
     installParserShims();
     pdfjsPromise = import('../vendor/pdfjs/pdf.mjs');
@@ -84,6 +90,7 @@ function shouldInsertSpace(buffer, nextToken) {
 }
 
 function normalizePageText(text) {
+  // Compact excessive whitespace while preserving paragraph boundaries.
   return String(text || '')
     .replace(/\r/g, '\n')
     .replace(/[ \t\f\v]+/g, ' ')
@@ -94,6 +101,7 @@ function normalizePageText(text) {
 }
 
 function isLikelyScannedPdf(content, pageCount) {
+  // Very low text density usually indicates an image-only scanned document.
   const visibleCharacters = String(content || '')
     .replace(PAGE_MARKER_PATTERN, '')
     .replace(/\s+/g, '')
@@ -158,6 +166,10 @@ function mapPdfError(error) {
 }
 
 export async function extractPdfText(pdfBytes) {
+  /**
+   * Extract text from all pages and return a normalized multi-page string.
+   * On failures, return a stable error contract for caller-facing UX.
+   */
   let loadingTask = null;
   let pdfDocument = null;
 

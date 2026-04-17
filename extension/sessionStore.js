@@ -1,3 +1,11 @@
+// Centralized persistence layer for:
+// - research sessions,
+// - drift-tracking runtime state,
+// - manual relevance overrides.
+//
+// All reads/writes go through chrome.storage.local to keep background and
+// sidepanel views synchronized.
+
 // Store sessions as an indexed map plus an explicit order list so export and sync can build on it later.
 const SESSION_STORAGE_KEYS = ['currentSessionId', 'sessionOrder', 'sessionsById', 'session'];
 const VALID_SESSION_STATUSES = new Set(['active', 'paused', 'saved']);
@@ -128,6 +136,7 @@ function moveSessionIdToFront(sessionOrder, sessionId) {
 }
 
 function normalizeSessionStoreSnapshot(snapshot = {}) {
+  // Normalize shape and IDs so legacy data does not break current UI assumptions.
   let changed = false;
   const rawSessions = snapshot.sessionsById && typeof snapshot.sessionsById === 'object'
     ? snapshot.sessionsById
@@ -219,6 +228,7 @@ async function persistSessionStore(store, { removeLegacy = false } = {}) {
 }
 
 async function getSessionStore() {
+  // Run migration and normalization on every read; writes are idempotent.
   const snapshot = await chrome.storage.local.get(SESSION_STORAGE_KEYS);
   const { store, changed, shouldRemoveLegacy } = migrateLegacySessionSnapshot(snapshot);
 
@@ -238,10 +248,12 @@ function cloneSessions(sessions) {
 }
 
 export async function ensureSessionStoreInitialized() {
+  // Warm up storage schema/migrations at extension startup.
   await getSessionStore();
 }
 
 export async function getAllSessions() {
+  // Return newest-first according to sessionOrder.
   const store = await getSessionStore();
   return cloneSessions(
     store.sessionOrder
@@ -268,6 +280,7 @@ export async function getCurrentSessionId() {
 }
 
 export async function saveSession(session) {
+  // Upsert session and keep it at the front of the recency order.
   const store = await getSessionStore();
   const existing = session?.id ? store.sessionsById[session.id] : null;
   const nowIso = new Date().toISOString();
@@ -299,6 +312,7 @@ export async function saveSession(session) {
 }
 
 export async function createSession(sessionData = {}) {
+  // Create a fresh session and make it current immediately.
   const nowIso = new Date().toISOString();
   const session = normalizeSession(
     {
@@ -325,6 +339,7 @@ export async function createSession(sessionData = {}) {
 }
 
 export async function deleteSession(sessionId) {
+  // Remove session and move current pointer to the next available session.
   if (!sessionId) return null;
 
   const store = await getSessionStore();
@@ -369,6 +384,7 @@ export async function setCurrentSession(sessionId) {
 }
 
 export function createDefaultBrowsingState(now = Date.now()) {
+  // Baseline runtime browsing context used by drift detection.
   return {
     currentTabId: null,
     currentUrl: null,
@@ -382,6 +398,7 @@ export function createDefaultBrowsingState(now = Date.now()) {
 }
 
 export function createDefaultDriftState(now = Date.now()) {
+  // Baseline drift score/status snapshot.
   return {
     status: 'focused',
     score: 0,
@@ -393,6 +410,7 @@ export function createDefaultDriftState(now = Date.now()) {
 }
 
 export function createActiveSession({ id, goal, questions = [], researchQuestions, createdAt }) {
+  // Runtime projection used by drift scoring; decoupled from full session object.
   const startedAt = createdAt ? new Date(createdAt).getTime() : Date.now();
   const normalizedQuestions = Array.isArray(researchQuestions) ? researchQuestions : questions;
   return {
@@ -406,6 +424,7 @@ export function createActiveSession({ id, goal, questions = [], researchQuestion
 }
 
 export function extractKeywords(goal, researchQuestions = []) {
+  // Cheap keyword extraction for on-device relevance scoring.
   const text = [goal, ...(researchQuestions || [])].join(' ').toLowerCase();
   const stop = new Set([
     'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'about', 'what',
@@ -432,6 +451,7 @@ export function normalizePageKey(url) {
 }
 
 export async function ensureDriftStateInitialized() {
+  // Initialize drift-specific storage keys if missing.
   const now = Date.now();
   const existing = await chrome.storage.local.get([
     'driftSettings',
@@ -454,6 +474,7 @@ export async function ensureDriftStateInitialized() {
 }
 
 export async function getDriftBundle() {
+  // Retrieve drift settings and runtime state in one read.
   const now = Date.now();
   const stored = await chrome.storage.local.get([
     'driftSettings',
@@ -485,6 +506,7 @@ export async function setActiveSession(activeSession) {
 }
 
 export async function resetDriftForSessionEnd() {
+  // Clear runtime drift context when a session is paused/ended/switched.
   await chrome.storage.local.set({
     activeSession: null,
     browsingState: createDefaultBrowsingState(Date.now()),
@@ -493,6 +515,7 @@ export async function resetDriftForSessionEnd() {
 }
 
 export async function addManualOverride(sessionId, url) {
+  // Mark a page as relevant for the current session to suppress false positives.
   if (!sessionId || !url) return;
   const pageKey = normalizePageKey(url);
   const stored = await chrome.storage.local.get(['manualRelevanceOverrides']);
@@ -503,6 +526,7 @@ export async function addManualOverride(sessionId, url) {
 }
 
 export function hasManualOverride({ manualRelevanceOverrides, sessionId, url }) {
+  // Read-side helper used by drift scoring loop.
   if (!sessionId || !url) return false;
   const pageKey = normalizePageKey(url);
   return Boolean(manualRelevanceOverrides?.[sessionId]?.[pageKey]);

@@ -1,3 +1,6 @@
+// PDF detection helpers shared by capture and auto-analysis flows.
+// These utilities intentionally combine URL/path/query/title heuristics.
+
 const PDF_EXTENSION_PATTERN = /\.pdf(?:$|[/?#])/i;
 const PDF_MIME_PATTERN = /\bapplication\/pdf\b/i;
 const PDF_VIEWER_QUERY_KEYS = ['src', 'file', 'url'];
@@ -62,10 +65,12 @@ function queryValueLooksLikePdf(key, value) {
 }
 
 export function contentTypeSuggestsPdf(contentType) {
+  // Accept common MIME variants as long as they include application/pdf.
   return PDF_MIME_PATTERN.test(String(contentType || ''));
 }
 
 export function resolvePdfResourceUrl(input) {
+  // Some viewers embed the real PDF in query params such as ?file=... or ?src=...
   const rawUrl = typeof input === 'string' ? input : input?.url || '';
   const parsed = tryParseUrl(rawUrl);
   if (!parsed) {
@@ -85,6 +90,7 @@ export function resolvePdfResourceUrl(input) {
 }
 
 export function urlClearlyIndicatesPdf(rawUrl) {
+  // Fast path for obvious *.pdf URLs; fallback to query/hash signal checks.
   const parsed = tryParseUrl(rawUrl);
   if (!parsed) {
     return valueLooksLikePdfFilename(rawUrl);
@@ -112,6 +118,7 @@ export function titleSuggestsPdf(title) {
 }
 
 export function shouldProbePdfContentType(tab, resolvedUrl = resolvePdfResourceUrl(tab)) {
+  // HEAD probing is only for uncertain http(s) URLs to avoid unnecessary network churn.
   const parsed = tryParseUrl(resolvedUrl);
   if (!parsed || !['http:', 'https:'].includes(parsed.protocol)) {
     return false;
@@ -136,6 +143,7 @@ export function shouldProbePdfContentType(tab, resolvedUrl = resolvePdfResourceU
 }
 
 export function tabCouldBePdf(tab) {
+  // Return both the decision and reasons so callers can debug detection behavior.
   const rawUrl = tab?.url || '';
   const resolvedUrl = resolvePdfResourceUrl(tab);
   const reasons = [];

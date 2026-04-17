@@ -18,16 +18,39 @@ from pydantic import BaseModel, Field
 # ── Request models ────────────────────────────────────────────────────────────
 
 class ClarifyStartRequest(BaseModel):
+    """Initial request for clarifying a rough research goal.
+
+    Input:
+        roughGoal: User-provided high-level research intent.
+    """
+
     roughGoal: str = Field(..., min_length=1, max_length=1000)
 
 
 class ClarifyNextRequest(BaseModel):
+    """Follow-up request carrying clarification chat state and user answers.
+
+    Input:
+        roughGoal: Original user goal text.
+        chatHistory: Prior assistant/user clarification turns.
+        answers: User answer list captured so far.
+    """
+
     roughGoal: str = Field(..., min_length=1, max_length=1000)
     chatHistory: List[dict] = Field(default_factory=list)
     answers: List[str] = Field(default_factory=list)
 
 
 class ClarifyRefineRequest(BaseModel):
+    """Request for improving an already proposed clarified goal.
+
+    Input:
+        roughGoal: Original user goal text.
+        chatHistory: Prior clarification conversation.
+        answers: Collected answers from the conversation.
+        currentClarifiedGoal: Current candidate goal to improve.
+    """
+
     roughGoal: str = Field(..., min_length=1, max_length=1000)
     chatHistory: List[dict] = Field(default_factory=list)
     answers: List[str] = Field(default_factory=list)
@@ -55,6 +78,21 @@ _SCHEMA_COMPLETE = (
 
 
 def build_start_prompt(rough_goal: str) -> str:
+    """Build the first-turn prompt for goal clarification.
+
+    Args:
+        rough_goal: Raw goal text provided by the user.
+
+    Returns:
+        A strict prompt instructing the model to either finalize the goal or
+        ask one high-value clarification question in JSON.
+
+    Steps:
+        1. Inject the user goal in a delimited block.
+        2. Describe decision criteria (specific vs vague).
+        3. Constrain output to one of two JSON schemas.
+    """
+
     # The user goal is wrapped in XML-style tags to reduce prompt-injection risk.
     return f"""User's rough research goal:
 <goal>{rough_goal}</goal>
@@ -70,6 +108,23 @@ OR
 
 
 def build_next_prompt(rough_goal: str, chat_history: list, answers: list) -> str:
+    """Build a continuation prompt from prior clarification turns.
+
+    Args:
+        rough_goal: Original user goal text.
+        chat_history: Ordered clarification messages.
+        answers: User answers collected so far.
+
+    Returns:
+        A prompt that asks the model to either finalize or ask one next
+        question based on progress.
+
+    Steps:
+        1. Count prior assistant questions.
+        2. Render chat history into readable dialogue lines.
+        3. Add explicit stopping and no-repeat rules.
+    """
+
     question_count = sum(1 for m in chat_history if m.get("role") == "assistant")
     history_lines = [
         f"{'Assistant' if m.get('role') == 'assistant' else 'User'}: {m.get('text', '')}"
@@ -105,6 +160,24 @@ def build_refine_prompt(
     answers: list,
     current_goal: str | None,
 ) -> str:
+    """Build a refinement prompt for improving a proposed clarified goal.
+
+    Args:
+        rough_goal: Original user goal text.
+        chat_history: Existing clarification conversation.
+        answers: User answers gathered so far.
+        current_goal: Current proposed clarified goal, if available.
+
+    Returns:
+        A prompt asking the model to refine the current goal or ask one final
+        targeted question.
+
+    Steps:
+        1. Render conversation context.
+        2. Include current goal candidate when present.
+        3. Enforce strict JSON output schema.
+    """
+
     history_lines = [
         f"{'Assistant' if m.get('role') == 'assistant' else 'User'}: {m.get('text', '')}"
         for m in chat_history
@@ -136,7 +209,25 @@ OR
 # ── Response parsing ──────────────────────────────────────────────────────────
 
 def parse_clarification_response(raw: str) -> dict[str, Any]:
-    """Parse and validate an LLM clarification response into a clean dict."""
+    """Parse and validate a clarification response payload.
+
+    Args:
+        raw: Raw model output expected to contain a JSON object.
+
+    Returns:
+        A normalized dict with one of two shapes:
+        - needs_clarification: assistant message + options
+        - complete: clarifiedGoal + rationale
+
+    Raises:
+        ValueError: If required fields are missing or status is unknown.
+        json.JSONDecodeError: If the raw payload is not valid JSON.
+
+    Steps:
+        1. Trim payload and remove accidental markdown fences.
+        2. Parse JSON.
+        3. Validate based on status and normalize fields.
+    """
     text = raw.strip()
     # Strip code fences if the model wraps output despite instructions
     text = re.sub(r"^```(?:json)?\s*", "", text)
@@ -146,6 +237,7 @@ def parse_clarification_response(raw: str) -> dict[str, Any]:
     status = data.get("status")
 
     if status == "needs_clarification":
+        # Branch A: the model requests another question-answer turn.
         msg = data.get("message") or {}
         if not msg.get("text"):
             raise ValueError("Missing message.text in needs_clarification response")
@@ -160,6 +252,7 @@ def parse_clarification_response(raw: str) -> dict[str, Any]:
         }
 
     if status == "complete":
+        # Branch B: the model finished and produced a clarified goal.
         if not data.get("clarifiedGoal"):
             raise ValueError("Missing clarifiedGoal in complete response")
         return {
@@ -194,6 +287,19 @@ _QUESTION_BANK: List[dict] = [
 
 
 def heuristic_start(rough_goal: str) -> dict[str, Any]:
+    """Return the first canned clarification question for offline mode.
+
+    Args:
+        rough_goal: Original user goal text (kept for interface consistency).
+
+    Returns:
+        A needs_clarification payload with the first question bank item.
+
+    Steps:
+        1. Select question index 0.
+        2. Wrap it in the same contract used by LLM responses.
+    """
+
     return {
         "status": "needs_clarification",
         "message": {
@@ -205,9 +311,27 @@ def heuristic_start(rough_goal: str) -> dict[str, Any]:
 
 
 def heuristic_next(rough_goal: str, chat_history: list, answers: list) -> dict[str, Any]:
+    """Advance or complete clarification using deterministic fallback rules.
+
+    Args:
+        rough_goal: Original user goal text.
+        chat_history: Prior clarification turns.
+        answers: User answers collected so far.
+
+    Returns:
+        A needs_clarification payload if more questions remain, otherwise a
+        complete payload with a synthesized clarified goal.
+
+    Steps:
+        1. Count assistant questions already asked.
+        2. Return the next canned question while the bank is not exhausted.
+        3. Synthesize a concise clarified goal from collected answers.
+    """
+
     question_count = sum(1 for m in chat_history if m.get("role") == "assistant")
 
     if question_count < len(_QUESTION_BANK):
+        # Continue asking predefined questions until the bank is exhausted.
         return {
             "status": "needs_clarification",
             "message": {
@@ -217,7 +341,7 @@ def heuristic_next(rough_goal: str, chat_history: list, answers: list) -> dict[s
             },
         }
 
-    # Synthesise a basic clarified goal from the collected answers
+    # Synthesize a basic clarified goal from the collected answers.
     parts = [rough_goal.rstrip(".")]
     if len(answers) > 0:
         parts.append(f"focusing on {answers[0].lower()}")

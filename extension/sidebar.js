@@ -1,3 +1,11 @@
+// Sidebar UI controller.
+//
+// This file manages:
+// - session selection and lifecycle actions,
+// - goal clarification UX,
+// - insights grouped/timeline rendering,
+// - settings editing and backend health checks.
+
 const insightGroupingApi = globalThis.ResearchCopilotInsightGrouping;
 
 const SIDEBAR_UI_STATE_KEY = 'sidebarUiState';
@@ -82,6 +90,7 @@ const tabPanels = {
 const clarificationState = createEmptyClarificationState();
 
 async function sendMessage(type, payload = {}) {
+  // All runtime messages are normalized through a strict { ok, data, error } contract.
   const response = await chrome.runtime.sendMessage({ type, payload });
   if (!response?.ok) {
     throw new Error(response?.error || 'Unexpected extension error');
@@ -166,6 +175,7 @@ async function getStateFromStorage() {
 }
 
 async function getBestAvailableState() {
+  // Prefer runtime state, but fall back to storage if the worker is unavailable.
   const storageStatePromise = getStateFromStorage();
 
   try {
@@ -411,6 +421,7 @@ function shouldMarkGoalEditorDirty(session, contextKey, value) {
 }
 
 async function syncOverviewContext(session = currentSession) {
+  // Keep drafts and clarification state scoped to the active overview context.
   const contextKey = getOverviewContextKey(session);
   const contextChanged = goalEditorState.contextKey !== contextKey
     || clarificationState.contextKey !== contextKey;
@@ -800,6 +811,7 @@ function createMissingTopicCard(text) {
 }
 
 function createSourceCard(source) {
+  // Reusable card renderer for analyzed page/PDF sources.
   const card = document.createElement('article');
   card.className = 'card source-item';
 
@@ -1314,6 +1326,7 @@ async function handleResetClarifiedGoal() {
 }
 
 function createSessionMenuRow(session, activeId) {
+  // Session switcher rows include open + delete actions for quick context switching.
   const row = document.createElement('div');
   row.className = 'session-menu-row';
 
@@ -1741,6 +1754,7 @@ function createClarificationConfirmationCard() {
 }
 
 function renderOverviewTab(session) {
+  // Overview is the session control center (goal editing, start/pause/resume/delete).
   overviewTabContentEl.innerHTML = '';
 
   const stack = document.createElement('div');
@@ -1948,6 +1962,7 @@ function renderOverviewTab(session) {
 }
 
 function renderSettingsTab() {
+  // Settings intentionally render from local draft state to support unsaved edits.
   settingsTabContentEl.innerHTML = '';
 
   const stack = document.createElement('div');
@@ -2388,6 +2403,7 @@ function renderEmptyInsightsState() {
 }
 
 function renderInsights(insights, highlightNew) {
+  // Build grouped and timeline views from one presentation model.
   insightsListEl.innerHTML = '';
 
   const hasInsights = Array.isArray(insights) && insights.length > 0;
@@ -2453,6 +2469,7 @@ function renderInsightsTab(session, highlightNew) {
 }
 
 function renderQuestionsTab(session) {
+  // Questions tab combines tracked questions with inferred missing topics.
   questionsTabContentEl.innerHTML = '';
 
   const stack = document.createElement('div');
@@ -2514,6 +2531,7 @@ function renderQuestionsTab(session) {
 }
 
 function renderSourcesTab(session) {
+  // Sources tab lists all captured documents tied to the session.
   sourcesTabContentEl.innerHTML = '';
 
   const stack = document.createElement('div');
@@ -2593,6 +2611,7 @@ async function syncSidebarState(state) {
 }
 
 function applySessionState(state, highlightNew = true) {
+  // Apply incoming state atomically so all tabs stay visually in sync.
   const nextSession = state?.session || null;
   const nextCurrentSessionId = state?.currentSessionId || nextSession?.id || null;
   const isSameSession = Boolean(currentSession?.id && nextSession?.id && currentSession.id === nextSession.id);
@@ -2620,6 +2639,7 @@ function applySessionState(state, highlightNew = true) {
 }
 
 async function refreshState(highlightNew = true) {
+  // Full refresh used by initialization and state-change events.
   const state = await getBestAvailableState();
   await syncSidebarState(state);
   applySessionState(state, highlightNew);
@@ -2640,6 +2660,7 @@ function scheduleRefreshState(highlightNew = false) {
   }, 0);
 }
 
+// UI event wiring.
 for (const button of tabButtons) {
   button.addEventListener('click', () => {
     setActiveTab(button.dataset.tab);
@@ -2729,6 +2750,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 async function initializeSidebar() {
+  // Bootstrap ordering: UI state -> data state -> render -> async health check.
   await loadSidebarUiState();
   const state = await getBestAvailableState();
   const { session, settings } = state;

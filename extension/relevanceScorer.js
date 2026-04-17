@@ -1,3 +1,6 @@
+// Lightweight heuristic relevance scorer used by the drift detector.
+// The goal is stability and explainability while keeping runtime cheap.
+
 const DISTRACTION_PATTERNS = [
   { category: 'social', penalty: 0.22, patterns: ['x.com', 'twitter.com', 'instagram.com', 'tiktok.com', 'reddit.com'] },
   { category: 'video', penalty: 0.18, patterns: ['youtube.com', 'youtu.be'] },
@@ -12,10 +15,12 @@ const GENTLE_GENERAL_DOMAINS = ['wikipedia.org', 'britannica.com', 'medium.com',
 // TODO: Expand domain-category map with locale-specific distraction/research sites.
 
 function clip01(value) {
+  // Keep scores in a normalized range so downstream labels are consistent.
   return Math.max(0, Math.min(1, value));
 }
 
 function tokenize(text) {
+  // Basic tokenization is enough here because the score is intentionally heuristic.
   return String(text || '')
     .toLowerCase()
     .split(/[^a-z0-9]+/g)
@@ -32,6 +37,7 @@ function includesDomain(domain, pattern) {
 }
 
 function getDistractionMatch(domain) {
+  // Domain-level patterns catch common distraction sites quickly.
   for (const group of DISTRACTION_PATTERNS) {
     for (const pattern of group.patterns) {
       if (includesDomain(domain, pattern)) {
@@ -52,6 +58,10 @@ function getDistractionMatch(domain) {
   };
 }
 
+/**
+ * Compute a heuristic relevance score for the current page.
+ * Returns score, label, matched keywords, distraction hints, and reasons.
+ */
 export function scorePageRelevance({
   goal,
   keywords = [],
@@ -83,6 +93,7 @@ export function scorePageRelevance({
   const distraction = getDistractionMatch(domain || '');
 
   let score = 0.34;
+  // Start from a neutral baseline and then add/subtract interpretable signals.
   if (overlapRatio > 0) {
     score += Math.min(0.45, overlapRatio * 0.85);
     reasons.push(`keyword overlap ${(overlapRatio * 100).toFixed(0)}%`);

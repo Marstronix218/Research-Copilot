@@ -6,8 +6,10 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body class="sidebar-body">
+    <!-- Main shell: sticky controls (session + tabs) and scrollable tab content. -->
     <div class="sidebar-shell">
       <div class="workspace-controls">
+        <!-- Session switcher controls active/past sessions and new-session entry. -->
         <section class="session-switcher-section" aria-label="Session switcher">
           <div class="section-header-inline">
             <h2>Session</h2>
@@ -103,10 +105,12 @@
       </div>
 
       <main class="workspace-content">
+        <!-- Overview tab: session actions and goal clarification workflow. -->
         <section id="overviewTabPanel" class="tab-panel" role="tabpanel" aria-labelledby="tab-overview">
           <div id="overviewTabContent"></div>
         </section>
 
+        <!-- Insights tab: grouped-by-topic and timeline renderers. -->
         <section
           id="insightsTabPanel"
           class="tab-panel hidden"
@@ -143,6 +147,7 @@
           <div id="insightsList"></div>
         </section>
 
+        <!-- Questions tab: tracked research questions and uncovered topics. -->
         <section
           id="questionsTabPanel"
           class="tab-panel hidden"
@@ -153,6 +158,7 @@
           <div id="questionsTabContent"></div>
         </section>
 
+        <!-- Sources tab: analyzed pages and PDFs associated with this session. -->
         <section
           id="sourcesTabPanel"
           class="tab-panel hidden"
@@ -163,6 +169,7 @@
           <div id="sourcesTabContent"></div>
         </section>
 
+        <!-- Settings tab: backend URL, auto-analyze, and UI preferences. -->
         <section
           id="settingsTabPanel"
           class="tab-panel hidden"

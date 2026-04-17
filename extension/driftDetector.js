@@ -1,3 +1,9 @@
+// Drift evaluation logic used by background.js on each periodic tick.
+
+/**
+ * Count how many most-recent history items are off-topic.
+ * Stops as soon as a relevant item is found.
+ */
 function countConsecutiveOffTopic(history) {
   let count = 0;
   for (let i = history.length - 1; i >= 0; i -= 1) {
@@ -9,6 +15,9 @@ function countConsecutiveOffTopic(history) {
   return count;
 }
 
+/**
+ * Evaluate browsing context against drift thresholds and notification rules.
+ */
 export function evaluateDrift({
   activeSession,
   browsingState,
