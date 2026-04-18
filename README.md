@@ -43,11 +43,26 @@ research-copilot/
 │   ├── app/
 │   │   ├── __init__.py
 │   │   ├── goal_clarifier.py
-│   │   └── main.py
+│   │   ├── main.py
+│   │   └── relevance_benchmark.py
 │   ├── requirements.txt
-│   └── run.sh
+│   ├── run.sh
+│   └── tests/
+│       ├── conftest.py
+│       ├── test_api_contracts.py
+│       ├── test_goal_clarifier.py
+│       ├── test_main_heuristics.py
+│       └── fixtures/
+│           └── relevance_cases.json
+├── docs/
+│   ├── ALGORITHM_RATIONALE.md
+│   └── ARCHITECTURE_DECISIONS.md
 ├── extension/
+│   ├── background/
+│   │   └── sessionUtils.js
 │   ├── background.js
+│   ├── contracts/
+│   │   └── messages.js
 │   ├── content.js
 │   ├── driftDetector.js
 │   ├── icons/
@@ -61,7 +76,16 @@ research-copilot/
 │   ├── sessionStore.js
 │   ├── sidebar.html
 │   ├── sidebar.js
+│   ├── tests/
+│   │   ├── backgroundSessionUtils.test.js
+│   │   ├── driftDetector.test.js
+│   │   ├── insightGrouping.test.js
+│   │   ├── messagesContract.test.js
+│   │   ├── pdfDetection.test.js
+│   │   └── relevanceScorer.test.js
 │   └── styles.css
+├── package.json
+├── vitest.config.js
 └── README.md
 ```
 
@@ -102,6 +126,34 @@ The backend runs on `http://localhost:8000` by default.
 3. Enable Developer mode.
 4. Click `Load unpacked`.
 5. Select the `extension/` folder.
+
+## Testing
+
+Run backend tests:
+
+```bash
+cd /path/to/research-copilot/backend
+pytest -q tests
+```
+
+Run extension tests:
+
+```bash
+cd /path/to/research-copilot
+npm test -- --run
+```
+
+Run heuristic benchmark (computational critique artifact):
+
+```bash
+cd /path/to/research-copilot/backend
+python app/relevance_benchmark.py
+```
+
+## Engineering rationale docs
+
+- `docs/ALGORITHM_RATIONALE.md`: Heuristic design choices and trade-offs.
+- `docs/ARCHITECTURE_DECISIONS.md`: Separation-of-concerns and abstraction decisions.
 
 ## How to use
 
