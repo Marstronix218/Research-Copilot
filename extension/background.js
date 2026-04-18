@@ -7,6 +7,7 @@
 // - extension-to-UI messaging.
 
 import { evaluateDrift } from './driftDetector.js';
+import { parseRuntimeMessage } from './contracts/messages.js';
 import { notifyDrift, shouldSendNotification } from './notificationManager.js';
 import {
   contentTypeSuggestsPdf,
@@ -17,6 +18,12 @@ import {
 } from './pdf/pdfDetection.js';
 import { extractPdfText } from './pdf/pdfTextExtractor.js';
 import { scorePageRelevance } from './relevanceScorer.js';
+import {
+  collectTopicsFromInsights,
+  mergeInsights,
+  mergeSources,
+  safeDomain,
+} from './background/sessionUtils.js';
 import {
   addManualOverride,
   createActiveSession,
@@ -123,9 +130,17 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 // Central message router for popup/sidebar/content-script requests.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
-    switch (message.type) {
+    const parsed = parseRuntimeMessage(message);
+    if (!parsed.ok) {
+      sendResponse({ ok: false, error: parsed.error });
+      return;
+    }
+
+    const { type, payload } = parsed;
+
+    switch (type) {
       case 'START_SESSION': {
-        const result = await startSession(message.payload);
+        const result = await startSession(payload);
         sendResponse({ ok: true, data: result });
         break;
       }
@@ -135,33 +150,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'CLEAR_SESSION': {
-        const sessionId = message.payload?.sessionId || await getCurrentSessionId();
+        const sessionId = payload?.sessionId || await getCurrentSessionId();
         const deleted = await deleteSessionAndSync(sessionId);
         sendResponse({ ok: true, data: deleted });
         break;
       }
       case 'OPEN_SESSION': {
-        const opened = await openSession(message.payload?.sessionId);
+        const opened = await openSession(payload?.sessionId);
         sendResponse({ ok: true, data: opened });
         break;
       }
       case 'DELETE_SESSION': {
-        const deleted = await deleteSessionAndSync(message.payload?.sessionId);
+        const deleted = await deleteSessionAndSync(payload?.sessionId);
         sendResponse({ ok: true, data: deleted });
         break;
       }
       case 'TOGGLE_SESSION_PAUSE': {
-        const updated = await toggleSessionPause(message.payload?.paused);
+        const updated = await toggleSessionPause(payload?.paused);
         sendResponse({ ok: true, data: updated });
         break;
       }
       case 'PAGE_CONTENT': {
-        const result = await handlePageContent(message.payload, sender);
+        const result = await handlePageContent(payload, sender);
         sendResponse({ ok: true, data: result });
         break;
       }
       case 'SAVE_ANALYSIS_INSIGHTS': {
-        const result = await saveAnalysisInsights(message.payload, sender);
+        const result = await saveAnalysisInsights(payload, sender);
         if (result && result.saved === false) {
           sendResponse({
             ok: false,
@@ -175,7 +190,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case 'SAVE_SETTINGS': {
         const current = await chrome.storage.local.get(['settings']);
-        const settings = { ...(current.settings || DEFAULT_SETTINGS), ...message.payload };
+        const settings = { ...(current.settings || DEFAULT_SETTINGS), ...payload };
         await chrome.storage.local.set({ settings });
         await broadcastSettingsUpdate(settings);
         sendResponse({ ok: true, data: settings });
@@ -183,8 +198,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case 'UPDATE_SESSION_GOAL': {
         const updated = await updateSessionGoal(
-          message.payload?.sessionId,
-          message.payload?.goal,
+          payload?.sessionId,
+          payload?.goal,
         );
         sendResponse({ ok: true, data: updated });
         break;
@@ -195,12 +210,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'USER_ACTIVITY_HEARTBEAT': {
-        const result = await handleUserActivityHeartbeat(message.payload, sender);
+        const result = await handleUserActivityHeartbeat(payload, sender);
         sendResponse({ ok: true, data: result });
         break;
       }
       case 'MARK_PAGE_RELEVANT': {
-        const result = await handleMarkPageRelevant(message.payload, sender);
+        const result = await handleMarkPageRelevant(payload, sender);
         sendResponse({ ok: true, data: result });
         break;
       }
@@ -1193,67 +1208,6 @@ async function runDriftTick(trigger) {
     reasons: evaluation.reasons,
     notify: canNotify,
   });
-}
-
-function insightKey(item) {
-  return `${item.topic || ''}::${item.summary || ''}`;
-}
-
-function collectTopicsFromInsights(insights) {
-  const seen = new Set();
-  const topics = [];
-  for (const insight of Array.isArray(insights) ? insights : []) {
-    const topic = String(insight?.topic || '').trim();
-    if (!topic) continue;
-    const key = topic.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    topics.push(topic);
-  }
-  return topics;
-}
-
-function mergeInsights(existing, incoming, source) {
-  // Merge by topic+summary key and attach additional source provenance.
-  const normalized = [...(Array.isArray(existing) ? existing : [])];
-  for (const item of Array.isArray(incoming) ? incoming : []) {
-    const key = insightKey(item);
-    const index = normalized.findIndex((x) => insightKey(x) === key);
-    if (index === -1) {
-      normalized.push({
-        ...item,
-        addedAt: new Date().toISOString(),
-        sources: [source],
-      });
-    } else {
-      const existingSources = Array.isArray(normalized[index].sources) ? normalized[index].sources : [];
-      const alreadyLinked = existingSources.some((x) => x.url === source.url);
-      if (!alreadyLinked) {
-        normalized[index] = {
-          ...normalized[index],
-          sources: [...existingSources, source],
-        };
-      }
-    }
-  }
-  return normalized;
-}
-
-function mergeSources(existing, source) {
-  const normalized = Array.isArray(existing) ? existing : [];
-  const found = normalized.find((x) => x.url === source.url);
-  if (found) {
-    return normalized.map((x) => (x.url === source.url ? { ...x, ...source } : x));
-  }
-  return [source, ...normalized];
-}
-
-function safeDomain(url) {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return '';
-  }
 }
 
 async function broadcastSessionUpdate() {

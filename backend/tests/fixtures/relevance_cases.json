@@ -1,0 +1,32 @@
+[
+  {
+    "question": "What causes climate change?",
+    "content": "Climate change causes include fossil fuel use, land use shifts, and methane emissions.",
+    "expected_covered": true
+  },
+  {
+    "question": "What policy solutions are working?",
+    "content": "The article explains policy pilots, carbon taxes, and adaptation grants in different regions.",
+    "expected_covered": true
+  },
+  {
+    "question": "Who is most affected by poverty?",
+    "content": "This page only describes macroeconomic GDP growth trends and currency adjustments.",
+    "expected_covered": false
+  },
+  {
+    "question": "What are long-term labor market trends?",
+    "content": "Labor market data from 1990 to 2025 shows sector shifts and automation impacts.",
+    "expected_covered": true
+  },
+  {
+    "question": "How do sea levels affect cities?",
+    "content": "The text discusses biodiversity and forest regeneration with no coastal impact analysis.",
+    "expected_covered": false
+  },
+  {
+    "question": "Which education interventions improve outcomes?",
+    "content": "The report compares interventions, attendance gains, and measurable learning outcomes.",
+    "expected_covered": true
+  }
+]
