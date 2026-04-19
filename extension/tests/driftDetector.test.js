@@ -5,9 +5,9 @@ import { evaluateDrift } from '../driftDetector.js';
 const NOW = 1_700_000_000_000;
 const defaultSettings = {
   inactivityThresholdMs: 10 * 60 * 1000,
-  unrelatedSoftThresholdMs: 4 * 60 * 1000,
-  unrelatedNotifyThresholdMs: 6 * 60 * 1000,
-  distractionNotifyThresholdMs: 5 * 60 * 1000,
+  unrelatedSoftThresholdMs: 3 * 60 * 1000,
+  unrelatedNotifyThresholdMs: 4 * 60 * 1000,
+  distractionNotifyThresholdMs: 1 * 60 * 1000,
 };
 
 describe('evaluateDrift', () => {
@@ -39,6 +39,31 @@ describe('evaluateDrift', () => {
     expect(result.status).toBe('inactive');
     expect(result.shouldNotify).toBe(true);
     expect(result.notificationType).toBe('inactive');
+  });
+
+  it('notifies after one minute on a distraction-category page with low relevance', () => {
+    const result = evaluateDrift({
+      activeSession: { isActive: true, goal: 'Research topic' },
+      browsingState: {
+        currentTabStartedAt: NOW - 61 * 1000,
+        recentHistory: [],
+      },
+      idleState: 'active',
+      driftSettings: defaultSettings,
+      now: NOW,
+      currentPage: {
+        url: 'https://youtube.com/watch?v=abc',
+        relevanceScore: 0.32,
+        relevanceLabel: 'low',
+        isDistraction: true,
+        distractionCategory: 'video',
+      },
+    });
+
+    expect(result.status).toBe('drifting');
+    expect(result.shouldNotify).toBe(true);
+    expect(result.notificationType).toBe('distraction_pattern');
+    expect(result.reasons.some((item) => item.includes('distraction-category page dwell'))).toBe(true);
   });
 
   it('marks drifting when there are three consecutive off-topic pages', () => {

@@ -23,6 +23,7 @@ import {
   mergeInsights,
   mergeSources,
   safeDomain,
+  updateBrowsingStateForActiveTab,
 } from './background/sessionUtils.js';
 import {
   addManualOverride,
@@ -93,6 +94,7 @@ if (!chrome.sidePanel?.setPanelBehavior) {
 
 chrome.tabs.onActivated.addListener(async () => {
   await syncActiveTabState('tabs.onActivated');
+  await runDriftTick('tab-activated');
   await maybeAutoCaptureCurrentPdfTab('tabs.onActivated');
 });
 
@@ -104,6 +106,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete') return;
   if (!tab?.active) return;
   await syncActiveTabState('tabs.onUpdated');
+  await runDriftTick('page-loaded');
   await maybeAutoCapturePdfTab(tab, 'tabs.onUpdated');
 });
 
@@ -114,6 +117,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.windows.onFocusChanged.addListener(async (windowId) => {
   if (windowId === chrome.windows.WINDOW_ID_NONE) return;
   await syncActiveTabState('windows.onFocusChanged');
+  await runDriftTick('window-focus');
 });
 
 chrome.idle.setDetectionInterval(60);
@@ -234,7 +238,7 @@ async function ensureDriftAlarm() {
   // One-minute cadence keeps drift state fresh without frequent wakeups.
   const alarm = await chrome.alarms.get(DRIFT_ALARM_NAME);
   if (!alarm) {
-    chrome.alarms.create(DRIFT_ALARM_NAME, { periodInMinutes: 1 });
+    await chrome.alarms.create(DRIFT_ALARM_NAME, { periodInMinutes: 1 });
   }
 }
 
@@ -1017,66 +1021,22 @@ async function syncActiveTabState(reason) {
   const samePage =
     browsingState.currentTabId === activeTab.id &&
     browsingState.currentUrl === activeTabUrl;
-
-  if (samePage) {
-    const refreshed = {
-      ...browsingState,
-      currentTitle: activeTab.title || browsingState.currentTitle,
-      currentDomain: safeDomain(activeTabUrl),
-      lastUserActivityAt: now,
-    };
-    await setBrowsingState(refreshed);
-    return;
-  }
-
-  const history = finalizeCurrentHistoryItem(browsingState.recentHistory || [], now);
-  history.push({
+  const updated = updateBrowsingStateForActiveTab({
+    browsingState,
     tabId: activeTab.id,
     url: activeTabUrl,
-    domain: safeDomain(activeTabUrl),
     title: activeTab.title || '',
-    startedAt: now,
-    endedAt: null,
-    dwellMs: 0,
-    relevanceScore: 0,
-    relevanceLabel: 'unknown',
-    isDistraction: false,
-    distractionCategory: null,
+    now,
+    maxRecentHistoryItems:
+      driftSettings.maxRecentHistoryItems || DEFAULT_DRIFT_SETTINGS.maxRecentHistoryItems,
+    treatAsNewVisit: reason === 'tabs.onUpdated',
+    recordActivity: !String(reason || '').startsWith('tick:'),
   });
 
-  const maxItems = driftSettings.maxRecentHistoryItems || DEFAULT_DRIFT_SETTINGS.maxRecentHistoryItems;
-  const trimmed = history.slice(-maxItems);
-
-  const updated = {
-    ...browsingState,
-    currentTabId: activeTab.id,
-    currentUrl: activeTabUrl,
-    currentDomain: safeDomain(activeTabUrl),
-    currentTitle: activeTab.title || '',
-    currentSnippet: '',
-    currentTabStartedAt: now,
-    lastUserActivityAt: now,
-    recentHistory: trimmed,
-  };
-
   await setBrowsingState(updated);
-  logDrift(driftSettings.debug, 'tab synced', { reason, url: activeTabUrl, domain: updated.currentDomain });
-}
-
-function finalizeCurrentHistoryItem(history, now) {
-  if (!history.length) return history;
-  const clone = [...history];
-  const index = clone.findLastIndex((x) => x.endedAt == null);
-  if (index === -1) return clone;
-
-  const item = clone[index];
-  const startedAt = item.startedAt || now;
-  clone[index] = {
-    ...item,
-    endedAt: now,
-    dwellMs: Math.max(0, now - startedAt),
-  };
-  return clone;
+  if (!samePage || reason === 'tabs.onUpdated') {
+    logDrift(driftSettings.debug, 'tab synced', { reason, url: activeTabUrl, domain: updated.currentDomain });
+  }
 }
 
 async function runDriftTick(trigger) {
@@ -1132,7 +1092,7 @@ async function runDriftTick(trigger) {
   });
 
   const updatedHistory = [...(browsingState.recentHistory || [])];
-  const activeIndex = updatedHistory.findLastIndex((x) => x.endedAt == null);
+  const activeIndex = updatedHistory.findLastIndex((item) => item?.endedAt == null);
   if (activeIndex >= 0) {
     const startedAt = updatedHistory[activeIndex].startedAt || now;
     updatedHistory[activeIndex] = {

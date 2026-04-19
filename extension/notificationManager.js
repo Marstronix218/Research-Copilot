@@ -50,7 +50,7 @@ export async function notifyDrift({ evaluation, goal, currentTabId }) {
   const copy = buildNotificationCopy(evaluation.notificationType, goal);
   await chrome.notifications.create({
     type: 'basic',
-    iconUrl: 'icons/research-copilot-notify.svg',
+    iconUrl: 'icons/icon.png',
     title: copy.title,
     message: copy.message,
     priority: 1,

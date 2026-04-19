@@ -55,6 +55,8 @@ let analysisToastTimeout;
 let driftToast;
 let driftToastTimeout;
 let lastActivityHeartbeatAt = 0;
+let latestAnalysisResult = null;
+let pendingInsightResult = null;
 
 function createBaseToast() {
   // Shared base styling keeps insight and drift toasts visually consistent.
@@ -174,6 +176,12 @@ async function persistAnalysisInsights(result, controls) {
 
 function showInsightNotification(result) {
   // Render a short summary with an optional one-click "save insights" action.
+  latestAnalysisResult = result;
+  if (driftToast) {
+    pendingInsightResult = result;
+    return;
+  }
+
   const insights = Array.isArray(result?.insights) ? result.insights : [];
   const hasInsights = insights.length > 0;
   const summaryText =
@@ -269,6 +277,13 @@ function showDriftToast({ title, message, showRelevantButton }) {
   // Drift toasts are intentionally distinct from analysis toasts to avoid confusion.
   if (!message) return;
 
+  if (analysisToast && latestAnalysisResult) {
+    pendingInsightResult = latestAnalysisResult;
+  }
+  if (analysisToast) {
+    dismissAnalysisToast();
+  }
+
   if (driftToast) driftToast.remove();
   if (driftToastTimeout) clearTimeout(driftToastTimeout);
 
@@ -329,6 +344,11 @@ function scheduleDriftToastDismiss(delayMs) {
     driftToast = null;
     driftToastTimeout = null;
     updateToastPositions();
+    if (pendingInsightResult) {
+      const deferredResult = pendingInsightResult;
+      pendingInsightResult = null;
+      showInsightNotification(deferredResult);
+    }
   }, delayMs);
 }
 

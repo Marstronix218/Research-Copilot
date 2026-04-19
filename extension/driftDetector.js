@@ -2,14 +2,20 @@
 
 /**
  * Count how many most-recent history items are off-topic.
- * Stops as soon as a relevant item is found.
+ * Stops as soon as a clearly relevant item is found.
+ * Items with 'unknown' label that have a low relevance score (or are on
+ * distraction domains) still count -- they were finalized before a drift
+ * tick could label them, which happens during rapid navigation.
  */
 function countConsecutiveOffTopic(history) {
   let count = 0;
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const item = history[i];
-    const offTopic = item.isDistraction || item.relevanceLabel === 'unrelated' || item.relevanceLabel === 'low';
-    if (!offTopic) break;
+    const labelOffTopic = item.relevanceLabel === 'unrelated' || item.relevanceLabel === 'low';
+    const unlabeledButLikelyOffTopic =
+      item.relevanceLabel === 'unknown' &&
+      (item.isDistraction || (typeof item.relevanceScore === 'number' && item.relevanceScore < 0.3));
+    if (!item.isDistraction && !labelOffTopic && !unlabeledButLikelyOffTopic) break;
     count += 1;
   }
   return count;
