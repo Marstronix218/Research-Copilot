@@ -13,12 +13,19 @@ const VALID_SESSION_STATUSES = new Set(['active', 'paused', 'saved']);
 export const DEFAULT_DRIFT_SETTINGS = {
   enabled: true,
   inactivityThresholdMs: 10 * 60 * 1000,
+  unrelatedSoftThresholdMs: 3 * 60 * 1000,
+  unrelatedNotifyThresholdMs: 4 * 60 * 1000,
+  distractionNotifyThresholdMs: 1 * 60 * 1000,
+  notificationCooldownMs: 3 * 60 * 1000,
+  maxRecentHistoryItems: 50,
+  debug: true,
+};
+
+const LEGACY_DEFAULT_DRIFT_SETTINGS = {
+  ...DEFAULT_DRIFT_SETTINGS,
   unrelatedSoftThresholdMs: 4 * 60 * 1000,
   unrelatedNotifyThresholdMs: 6 * 60 * 1000,
   distractionNotifyThresholdMs: 5 * 60 * 1000,
-  notificationCooldownMs: 8 * 60 * 1000,
-  maxRecentHistoryItems: 50,
-  debug: true,
 };
 
 // TODO: Add user-configurable drift sensitivity controls in popup settings.
@@ -450,6 +457,28 @@ export function normalizePageKey(url) {
   }
 }
 
+function normalizeDriftSettings(input) {
+  const stored = input && typeof input === 'object' ? input : {};
+  const normalized = {
+    ...DEFAULT_DRIFT_SETTINGS,
+    ...stored,
+  };
+
+  // Apply new defaults to previously persisted default values while preserving
+  // any manually tuned settings already stored in the profile.
+  [
+    'unrelatedSoftThresholdMs',
+    'unrelatedNotifyThresholdMs',
+    'distractionNotifyThresholdMs',
+  ].forEach((key) => {
+    if (stored[key] === LEGACY_DEFAULT_DRIFT_SETTINGS[key]) {
+      normalized[key] = DEFAULT_DRIFT_SETTINGS[key];
+    }
+  });
+
+  return normalized;
+}
+
 export async function ensureDriftStateInitialized() {
   // Initialize drift-specific storage keys if missing.
   const now = Date.now();
@@ -462,7 +491,14 @@ export async function ensureDriftStateInitialized() {
   ]);
 
   const updates = {};
-  if (!existing.driftSettings) updates.driftSettings = { ...DEFAULT_DRIFT_SETTINGS };
+  if (!existing.driftSettings) {
+    updates.driftSettings = { ...DEFAULT_DRIFT_SETTINGS };
+  } else {
+    const normalizedDriftSettings = normalizeDriftSettings(existing.driftSettings);
+    if (JSON.stringify(normalizedDriftSettings) !== JSON.stringify(existing.driftSettings)) {
+      updates.driftSettings = normalizedDriftSettings;
+    }
+  }
   if (!existing.browsingState) updates.browsingState = createDefaultBrowsingState(now);
   if (!existing.driftState) updates.driftState = createDefaultDriftState(now);
   if (!existing.manualRelevanceOverrides) updates.manualRelevanceOverrides = {};
@@ -485,7 +521,7 @@ export async function getDriftBundle() {
   ]);
 
   return {
-    driftSettings: { ...DEFAULT_DRIFT_SETTINGS, ...(stored.driftSettings || {}) },
+    driftSettings: normalizeDriftSettings(stored.driftSettings),
     browsingState: stored.browsingState || createDefaultBrowsingState(now),
     driftState: stored.driftState || createDefaultDriftState(now),
     manualRelevanceOverrides: stored.manualRelevanceOverrides || {},
