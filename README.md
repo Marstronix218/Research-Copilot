@@ -133,7 +133,7 @@ Run backend tests:
 
 ```bash
 cd /path/to/research-copilot/backend
-pytest -q tests
+python -m pytest -q tests
 ```
 
 Run extension tests:
